@@ -97,6 +97,9 @@ void run(Strings args)
             readOnlyMode = true;
             evalOnly = true;
         }
+        else if (arg == "--xml-debug-coercion-failure") {
+            xmldebugCorcionFailure = true;
+        }
         else if (arg == "--parse-only") {
             readOnlyMode = true;
             parseOnly = evalOnly = true;

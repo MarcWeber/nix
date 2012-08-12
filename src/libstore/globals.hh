@@ -113,7 +113,13 @@ void overrideSetting(const string & name, const Strings & value);
 
 void reloadSettings();
 
-void setDefaultsFromEnvironment();
 
+/* if set to true this prints the type which nix tried to coerce to a non matching type
+ * printing the xml can lead to infinite recursions etc.. So this is for
+ * debugging your Nix code only
+ */
+extern bool xmldebugCorcionFailure;
+
+void setDefaultsFromEnvironment();
 
 }

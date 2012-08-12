@@ -201,6 +201,8 @@ private:
     void addPrimOp(const string & name,
         unsigned int arity, PrimOpFun primOp);
 
+    string showTypeOrXml(Value &v);
+
     inline Value * lookupVar(Env * env, const VarRef & var);
     
     friend class ExprVar;

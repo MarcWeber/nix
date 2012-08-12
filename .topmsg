@@ -1,0 +1,14 @@
+From: Marc Weber <marco-oweber@gmx.de>
+Subject: [PATCH] experimental/write-file-hashed
+
+Until somebody takes time to implement password protection proberly eg the way its suggested here:
+https://github.com/NixOS/nix/issues/8, implement a quick and dirty way to write password files.
+
+The idea is to make nixos-rebuild write the password files based on
+configuration.nix so that they can be read by scripts (eg mysql startup script)
+without being stored in the store which would be public readable.
+
+Using this you also have to copy the password files - copying store paths is no
+longer enough to reproduce your system
+
+Signed-off-by: Marc Weber <marco-oweber@gmx.de>

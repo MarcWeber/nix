@@ -1,0 +1,13 @@
+From: Marc Weber <marco-oweber@gmx.de>
+Subject: [PATCH] experimental/debug-coercions-as-xml
+
+We're all pretty helpless seeing messages like:
+
+  value is an attribute set while a list was expected
+
+This patch add sthe flag --xml-debug-coercion-failure
+making nix output the xml representation of the attribute set
+- which of course may fail eg if infinite recursions are used.
+However its more often useful than failing.
+
+Signed-off-by: Marc Weber <marco-oweber@gmx.de>

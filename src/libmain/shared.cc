@@ -198,6 +198,9 @@ static void initAndRun(int argc, char * * argv)
             useBuildHook = false;
         else if (arg == "--show-trace")
             showTrace = true;
+        else if (arg == "--xml-debug-coercion-failure") {
+            xmldebugCorcionFailure = true;
+        }
         else if (arg == "--option") {
             ++i; if (i == args.end()) throw UsageError("`--option' requires two arguments");
             string name = *i;

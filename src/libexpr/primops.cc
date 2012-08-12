@@ -15,6 +15,8 @@
 #include <algorithm>
 #include <cstring>
 
+#include <fcntl.h>
+
 
 namespace nix {
 
@@ -666,6 +668,119 @@ struct FilterFromExpr : PathFilter
         return state.forceBool(res);
     }
 };
+/* arguments:
+   attr with names:
+   {
+     prefix = 
+     dir = 
+     contents  =
+   }
+
+   The function calculates a hash based on the (string) contents writing a
+   dir/${prefix}${hash} file with 700 mode
+
+   This way you configure passwords in configuration.nix without writing them
+   to the store - which also implies that you have to copy your dir to another
+   machine to duplicate it .. copying your store contents is no longer enough.
+
+   Upstart jobs are usualyl run as root anyway.
+
+   The perfect solution would be: https://github.com/NixOS/nix/issues/8
+   But until that exists - this is faster to implement
+
+   // TODO add some caching, allow setting user/group ids and mode?
+   */
+static void prim_writeFileHashed(EvalState & state, Value * * args, Value & v)
+{
+    PathSet context;
+
+    Value & a = *args[0];
+
+    state.forceAttrs(a);
+
+    string dir = "";
+    string prefix = "";
+    string contents = "";
+    unsigned int mode = ~0400;
+
+    int u_id = -1;
+    int g_id = -1;
+
+    // dir
+    Bindings::iterator j = a.attrs->find(state.symbols.create("dir"));
+    if (j == a.attrs->end())
+        throw TypeError("`dir' attribute missing in a call to `writeFileHashed'");
+    dir = state.forceStringNoCtx(*j->value);
+
+    // optional prefix
+    j = a.attrs->find(state.symbols.create("prefix"));
+    if (j != a.attrs->end()){
+      prefix = state.forceStringNoCtx(*j->value);
+    }
+
+    // contents
+    j = a.attrs->find(state.symbols.create("contents"));
+    if (j == a.attrs->end())
+        throw TypeError("`contents' attribute missing in a call to `writeFileHashed'");
+    contents = state.forceStringNoCtx(*j->value);
+
+
+    // uid
+    j = a.attrs->find(state.symbols.create("uid"));
+    if (j != a.attrs->end()){
+      u_id = state.forceInt(*j->value);
+    }
+    // gid
+    j = a.attrs->find(state.symbols.create("gid"));
+    if (j != a.attrs->end()){
+      g_id = state.forceInt(*j->value);
+    }
+
+    // mode
+    j = a.attrs->find(state.symbols.create("mode"));
+    if (j != a.attrs->end()){
+      string mode_str = state.forceStringNoCtx(*j->value);
+      if (mode_str.length() != 3){
+        // should also verify that 0-7 only ..
+        throw EvalError(format("bad mode string! %s") % mode_str);
+      }
+      if (mode_str[0] < '0' || mode_str[0] > '7'
+         || mode_str[1] < '0' || mode_str[1] > '7'
+         || mode_str[2] < '0' || mode_str[2] > '7'
+         )
+        throw EvalError(format("bad mode string! %s") % mode_str);
+      int dec = atoi(mode_str.c_str());
+
+      mode = ~( (dec        % 10) 
+              + ((dec /  10 % 10) << 3)
+              + ((dec / 100 % 10) << 6) );
+    }
+
+    Hash h = hashString(htMD5, contents);
+
+    string path = (format("%1%/%2%%3%") % dir % prefix % printHash(h)).str();
+
+    // unlink so that the file is always recreated with umask
+    unlink(path.c_str());
+
+    AutoCloseFD fd = open(path.c_str(), O_WRONLY | O_TRUNC | O_CREAT, mode);
+
+    if (!fd)
+      throw EvalError(format("Couldn't create file `%1%'") % path);
+
+    // try setting owner:
+    if (u_id != -1 || g_id != -1){
+      if (fchown(fd, u_id, g_id)){
+        throw EvalError(format("Couldn't set uid, gid of file `%1%' - take care - the file may have been truncated!") % path);
+      }
+    }
+
+    // everything is fine - write and close
+    writeFull(fd, (unsigned char *) contents.data(), contents.size());
+    fd.close();
+
+    mkString(v, path, context);
+};
 
 
 static void prim_filterSource(EvalState & state, Value * * args, Value & v)
@@ -1103,6 +1218,9 @@ void EvalState::createBaseEnv()
     addPrimOp("__toXML", 1, prim_toXML);
     addPrimOp("__toFile", 2, prim_toFile);
     addPrimOp("__filterSource", 2, prim_filterSource);
+
+
+    addPrimOp("writeFileHashed", 1, prim_writeFileHashed);
 
     // Attribute sets
     addPrimOp("__attrNames", 1, prim_attrNames);

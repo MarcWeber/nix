@@ -45,7 +45,7 @@
 #include <sched.h>
 #endif
 
-#define CHROOT_ENABLED HAVE_CHROOT && HAVE_UNSHARE && HAVE_SYS_MOUNT_H && defined(MS_BIND) && defined(CLONE_NEWNS)
+#define CHROOT_ENABLED HAVE_CHROOT && HAVE_UNSHARE && HAVE_SYS_MOUNT_H && defined(MS_BIND) && defined(MS_PRIVATE) && defined(CLONE_NEWNS)
 
 #if CHROOT_ENABLED
 #include <sys/socket.h>
@@ -1471,9 +1471,9 @@ HookReply DerivationGoal::tryBuildHook()
 }
 
 
-void chmod(const Path & path, mode_t mode)
+void chmod_(const Path & path, mode_t mode)
 {
-    if (::chmod(path.c_str(), 01777) == -1)
+    if (chmod(path.c_str(), mode) == -1)
         throw SysError(format("setting permissions on `%1%'") % path);
 }
 
@@ -1675,7 +1675,7 @@ void DerivationGoal::startBuilder()
            instead.) */
         Path chrootTmpDir = chrootRootDir + "/tmp";
         createDirs(chrootTmpDir);
-        chmod(chrootTmpDir, 01777);
+        chmod_(chrootTmpDir, 01777);
 
         /* Create a /etc/passwd with entries for the build user and the
            nobody account.  The latter is kind of a hack to support
@@ -1719,7 +1719,7 @@ void DerivationGoal::startBuilder()
            precaution, make the fake Nix store only writable by the
            build user. */
         createDirs(chrootRootDir + nixStore);
-        chmod(chrootRootDir + nixStore, 01777);
+        chmod_(chrootRootDir + nixStore, 01777);
 
         foreach (PathSet::iterator, i, inputPaths) {
             struct stat st;
@@ -1853,22 +1853,40 @@ void DerivationGoal::initChild()
             char domainname[] = "(none)"; // kernel default
             setdomainname(domainname, sizeof(domainname));
 
+            /* Make all filesystems private.  This is necessary
+               because subtrees may have been mounted as "shared"
+               (MS_SHARED).  (Systemd does this, for instance.)  Even
+               though we have a private mount namespace, mounting
+               filesystems on top of a shared subtree still propagates
+               outside of the namespace.  Making a subtree private is
+               local to the namespace, though, so setting MS_PRIVATE
+               does not affect the outside world. */
+            Strings mounts = tokenizeString(readFile("/proc/self/mountinfo", true), "\n");
+            foreach (Strings::iterator, i, mounts) {
+                Strings fields = tokenizeString(*i, " ");
+                assert(fields.size() >= 5);
+                Strings::iterator j = fields.begin();
+                std::advance(j, 4);
+                if (mount(0, j->c_str(), 0, MS_PRIVATE, 0) == -1)
+                    throw SysError(format("unable to make filesystem `%1%' private") % *j);
+            }
+
             /* Bind-mount all the directories from the "host"
                filesystem that we want in the chroot
                environment. */
             foreach (PathSet::iterator, i, dirsInChroot) {
                 Path source = *i;
                 Path target = chrootRootDir + source;
+                if (source == "/proc") continue; // backwards compatibility
                 debug(format("bind mounting `%1%' to `%2%'") % source % target);
-                
                 createDirs(target);
-                
                 if (mount(source.c_str(), target.c_str(), "", MS_BIND, 0) == -1)
                     throw SysError(format("bind mount from `%1%' to `%2%' failed") % source % target);
             }
 
             /* Bind a new instance of procfs on /proc to reflect our
                private PID namespace. */
+            createDirs(chrootRootDir + "/proc");
             if (mount("none", (chrootRootDir + "/proc").c_str(), "proc", 0, 0) == -1)
                 throw SysError("mounting /proc");
 

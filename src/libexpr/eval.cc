@@ -1,4 +1,4 @@
-#include "eval.hh"
+once#include "eval.hh"
 #include "hash.hh"
 #include "util.hh"
 #include "store-api.hh"
@@ -145,6 +145,8 @@ EvalState::EvalState()
 {
     nrEnvs = nrValuesInEnvs = nrValues = nrListElems = 0;
     nrAttrsets = nrOpUpdates = nrOpUpdateValuesCopied = 0;
+    nrListConcats = nrPrimOpCalls = nrFunctionCalls = 0;
+    countCalls = getEnv("NIX_COUNT_CALLS", "0") != "0";
 
 #if HAVE_BOEHMGC
     static bool gcInitialised = true;
@@ -313,8 +315,10 @@ inline Value * EvalState::lookupVar(Env * env, const VarRef & var)
     if (var.fromWith) {
         while (1) {
             Bindings::iterator j = env->values[0]->attrs->find(var.name);
-            if (j != env->values[0]->attrs->end())
+            if (j != env->values[0]->attrs->end()) {
+                if (countCalls && j->pos) attrSelects[*j->pos]++;
                 return j->value;
+            }
             if (env->prevWith == 0)
                 throwEvalError("undefined variable `%1%'", var.name);
             for (unsigned int l = env->prevWith; l; --l, env = env->up) ;
@@ -357,7 +361,7 @@ void EvalState::mkList(Value & v, unsigned int length)
 {
     v.type = tList;
     v.list.length = length;
-    v.list.elems = (Value * *) GC_MALLOC(length * sizeof(Value *));
+    v.list.elems = length ? (Value * *) GC_MALLOC(length * sizeof(Value *)) : 0;
     nrListElems += length;
 }
 
@@ -632,8 +636,10 @@ void ExprSelect::eval(EvalState & state, Env & env, Value & v)
             }
             vAttrs = j->value;
             pos = j->pos;
+            if (state.countCalls && pos) state.attrSelects[*pos]++;
         }
     
+
         state.forceValue(*vAttrs);
         
     } catch (Error & e) {
@@ -713,6 +719,8 @@ void EvalState::callFunction(Value & fun, Value & arg, Value & v)
                 vArgs[n--] = arg->primOpApp.right;
 
             /* And call the primop. */
+            nrPrimOpCalls++;
+            if (countCalls) primOpCalls[primOp->primOp->name]++;
             try {
                 primOp->primOp->fun(*this, vArgs, v);
             } catch (Error & e) {
@@ -729,7 +737,7 @@ void EvalState::callFunction(Value & fun, Value & arg, Value & v)
     }
     
     if (fun.type != tLambda)
-        throwTypeError("attempt to call something which is neither a function nor a primop (built-in operation) but %1%",
+        throwTypeError("attempt to call something which is not a function but %1%",
             showTypeOrXml(fun));
 
     unsigned int size =
@@ -772,6 +780,9 @@ void EvalState::callFunction(Value & fun, Value & arg, Value & v)
         if (!fun.lambda.fun->formals->ellipsis && attrsUsed != arg.attrs->size()) 
             throwTypeError("function at %1% called with unexpected argument", fun.lambda.fun->pos);
     }
+
+    nrFunctionCalls++;
+    if (countCalls) functionCalls[fun.lambda.fun->pos]++;
 
     try {
         fun.lambda.fun->body->eval(*this, env2, v);
@@ -915,14 +926,36 @@ void ExprOpUpdate::eval(EvalState & state, Env & env, Value & v)
 void ExprOpConcatLists::eval(EvalState & state, Env & env, Value & v)
 {
     Value v1; e1->eval(state, env, v1);
-    state.forceList(v1);
     Value v2; e2->eval(state, env, v2);
-    state.forceList(v2);
-    state.mkList(v, v1.list.length + v2.list.length);
-    for (unsigned int n = 0; n < v1.list.length; ++n)
-        v.list.elems[n] = v1.list.elems[n];
-    for (unsigned int n = 0; n < v2.list.length; ++n)
-        v.list.elems[n + v1.list.length] = v2.list.elems[n];
+    Value * lists[2] = { &v1, &v2 };
+    state.concatLists(v, 2, lists);
+}
+
+
+void EvalState::concatLists(Value & v, unsigned int nrLists, Value * * lists)
+{
+    nrListConcats++;
+
+    Value * nonEmpty = 0;
+    unsigned int len = 0;
+    for (unsigned int n = 0; n < nrLists; ++n) {
+        forceList(*lists[n]);
+        unsigned int l = lists[n]->list.length;
+        len += l;
+        if (l) nonEmpty = lists[n];
+    }
+
+    if (nonEmpty && len == nonEmpty->list.length) {
+        v = *nonEmpty;
+        return;
+    }
+
+    mkList(v, len);
+    for (unsigned int n = 0, pos = 0; n < nrLists; ++n) {
+        unsigned int l = lists[n]->list.length;
+        memcpy(v.list.elems + pos, lists[n]->list.elems, l * sizeof(Value *));
+        pos += l;
+    }
 }
 
 
@@ -945,7 +978,7 @@ void ExprConcatStrings::eval(EvalState & state, Env & env, Value & v)
             isPath = vStr.type == tPath;
             first = false;
         }
-            
+
         s << state.coerceToString(vStr, context, false, !isPath);
     }
         
@@ -1220,6 +1253,7 @@ void EvalState::printStats()
         % nrEnvs % (nrEnvs * sizeof(Env) + nrValuesInEnvs * sizeof(Value *)));
     printMsg(v, format("  list elements: %1% (%2% bytes)")
         % nrListElems % (nrListElems * sizeof(Value *)));
+    printMsg(v, format("  list concatenations: %1%") % nrListConcats);
     printMsg(v, format("  values allocated: %1% (%2% bytes)")
         % nrValues % (nrValues * sizeof(Value)));
     printMsg(v, format("  attribute sets allocated: %1%") % nrAttrsets);
@@ -1229,6 +1263,36 @@ void EvalState::printStats()
     printMsg(v, format("  number of thunks: %1%") % nrThunks);
     printMsg(v, format("  number of thunks avoided: %1%") % nrAvoided);
     printMsg(v, format("  number of attr lookups: %1%") % nrLookups);
+    printMsg(v, format("  number of primop calls: %1%") % nrPrimOpCalls);
+    printMsg(v, format("  number of function calls: %1%") % nrFunctionCalls);
+
+    if (countCalls) {
+
+        printMsg(v, format("calls to %1% primops:") % primOpCalls.size());
+        typedef std::multimap<unsigned int, Symbol> PrimOpCalls_;
+        std::multimap<unsigned int, Symbol> primOpCalls_;
+        foreach (PrimOpCalls::iterator, i, primOpCalls)
+            primOpCalls_.insert(std::pair<unsigned int, Symbol>(i->second, i->first));
+        foreach_reverse (PrimOpCalls_::reverse_iterator, i, primOpCalls_)
+            printMsg(v, format("%1$10d %2%") % i->first % i->second);
+
+        printMsg(v, format("calls to %1% functions:") % functionCalls.size());
+        typedef std::multimap<unsigned int, Pos> FunctionCalls_;
+        std::multimap<unsigned int, Pos> functionCalls_;
+        foreach (FunctionCalls::iterator, i, functionCalls)
+            functionCalls_.insert(std::pair<unsigned int, Pos>(i->second, i->first));
+        foreach_reverse (FunctionCalls_::reverse_iterator, i, functionCalls_)
+            printMsg(v, format("%1$10d %2%") % i->first % i->second);
+
+        printMsg(v, format("evaluations of %1% attributes:") % attrSelects.size());
+        typedef std::multimap<unsigned int, Pos> AttrSelects_;
+        std::multimap<unsigned int, Pos> attrSelects_;
+        foreach (AttrSelects::iterator, i, attrSelects)
+            attrSelects_.insert(std::pair<unsigned int, Pos>(i->second, i->first));
+        foreach_reverse (AttrSelects_::reverse_iterator, i, attrSelects_)
+            printMsg(v, format("%1$10d %2%") % i->first % i->second);
+
+    }
 }
 
 

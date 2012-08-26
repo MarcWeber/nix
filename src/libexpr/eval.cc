@@ -1,4 +1,4 @@
-once#include "eval.hh"
+#include "eval.hh"
 #include "hash.hh"
 #include "util.hh"
 #include "store-api.hh"

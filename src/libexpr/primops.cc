@@ -1086,8 +1086,8 @@ static void prim_hash(EvalState & state, Value * * args, Value & v)
 {
     PathSet context;
 
-    string s = state.coerceToString(*args[0], context);
-    string type = state.coerceToString(*args[1], context);
+    string type = state.coerceToString(*args[0], context);
+    string s = state.coerceToString(*args[1], context);
 
     HashType ht;
     if (type == "md5"){

@@ -1136,6 +1136,30 @@ static void prim_unsafeDiscardOutputDependency(EvalState & state, Value * * args
 }
 
 
+static void prim_hash(EvalState & state, Value * * args, Value & v)
+{
+    PathSet context;
+
+    string s = state.coerceToString(*args[0], context);
+    string type = state.coerceToString(*args[1], context);
+
+    HashType ht;
+    if (type == "md5"){
+      ht = htMD5;
+    } else if (type == "sha256"){
+      ht = htSHA256;
+    } else {
+      throw Error(format("bad hash type `%1%'") % type);
+    }
+
+    Hash h = hashString(htMD5, s);
+
+    string hash = printHash(h);
+
+    mkString(v, hash, context);
+};
+
+
 /*************************************************************
  * Versions
  *************************************************************/
@@ -1252,6 +1276,8 @@ void EvalState::createBaseEnv()
     addPrimOp("__stringLength", 1, prim_stringLength);
     addPrimOp("__unsafeDiscardStringContext", 1, prim_unsafeDiscardStringContext);
     addPrimOp("__unsafeDiscardOutputDependency", 1, prim_unsafeDiscardOutputDependency);
+
+    addPrimOp("__hash", 2, prim_hash);
 
     // Versions
     addPrimOp("__parseDrvName", 1, prim_parseDrvName);

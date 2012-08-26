@@ -1201,8 +1201,8 @@ static void prim_hash(EvalState & state, Value * * args, Value & v)
 {
     PathSet context;
 
-    string s = state.coerceToString(*args[0], context);
-    string type = state.coerceToString(*args[1], context);
+    string type = state.coerceToString(*args[0], context);
+    string s = state.coerceToString(*args[1], context);
 
     HashType ht;
     if (type == "md5"){
@@ -1213,7 +1213,7 @@ static void prim_hash(EvalState & state, Value * * args, Value & v)
       throw Error(format("bad hash type `%1%'") % type);
     }
 
-    Hash h = hashString(htMD5, s);
+    Hash h = hashString(ht, s);
 
     string hash = printHash(h);
 

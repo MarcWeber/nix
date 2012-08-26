@@ -1,0 +1,6 @@
+From: Marc Weber <marco-oweber@gmx.de>
+Subject: [PATCH] experimental/hash
+
+adding primop function calculating hash of a string
+
+Signed-off-by: Marc Weber <marco-oweber@gmx.de>

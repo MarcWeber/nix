@@ -1098,7 +1098,7 @@ static void prim_hash(EvalState & state, Value * * args, Value & v)
       throw Error(format("bad hash type `%1%'") % type);
     }
 
-    Hash h = hashString(htMD5, s);
+    Hash h = hashString(ht, s);
 
     string hash = printHash(h);
 

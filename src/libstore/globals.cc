@@ -1,4 +1,4 @@
-once#include "config.h"
+#include "config.h"
 
 #include "globals.hh"
 #include "util.hh"

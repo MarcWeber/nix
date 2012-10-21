@@ -36,7 +36,7 @@ static void sigintHandler(int signo)
 void printGCWarning()
 {
     static bool haveWarned = false;
-    warnOnce(haveWarned, 
+    warnOnce(haveWarned,
         "you did not specify `--add-root'; "
         "the result might be removed by the garbage collector");
 }
@@ -64,7 +64,7 @@ void printMissing(StoreAPI & store, const PathSet & paths)
 
     if (!unknown.empty()) {
         printMsg(lvlInfo, format("don't know how to build these paths%1%:")
-            % (readOnlyMode ? " (may be caused by read-only store access)" : ""));
+            % (settings.readOnlyMode ? " (may be caused by read-only store access)" : ""));
         foreach (PathSet::iterator, i, unknown)
             printMsg(lvlInfo, format("  %1%") % *i);
     }
@@ -83,12 +83,22 @@ static void setLogType(string lt)
 static bool showTrace = false;
 
 
+string getArg(const string & opt,
+    Strings::iterator & i, const Strings::iterator & end)
+{
+    ++i;
+    if (i == end) throw UsageError(format("`%1%' requires an argument") % opt);
+    return *i;
+}
+
+
 /* Initialize and reorder arguments, then call the actual argument
    processor. */
 static void initAndRun(int argc, char * * argv)
 {
-    setDefaultsFromEnvironment();
-    
+    settings.processEnvironment();
+    settings.loadConfFile();
+
     /* Catch SIGINT. */
     struct sigaction act;
     act.sa_handler = sigintHandler;
@@ -115,8 +125,7 @@ static void initAndRun(int argc, char * * argv)
 
     /* There is no privacy in the Nix system ;-)  At least not for
        now.  In particular, store objects should be readable by
-       everybody.  This prevents nasty surprises when using a shared
-       store (with the setuid() hack). */
+       everybody. */
     umask(0022);
 
     /* Process the NIX_LOG_TYPE environment variable. */
@@ -127,7 +136,7 @@ static void initAndRun(int argc, char * * argv)
     Strings args, remaining;
     while (argc--) args.push_back(*argv++);
     args.erase(args.begin());
-    
+
     /* Expand compound dash options (i.e., `-qlf' -> `-q -l -f'), and
        ignore options for the ATerm library. */
     for (Strings::iterator i = args.begin(); i != args.end(); ++i) {
@@ -146,20 +155,19 @@ static void initAndRun(int argc, char * * argv)
     remaining.clear();
 
     /* Process default options. */
-    int verbosityDelta = 0;
+    int verbosityDelta = lvlInfo;
     for (Strings::iterator i = args.begin(); i != args.end(); ++i) {
         string arg = *i;
         if (arg == "--verbose" || arg == "-v") verbosityDelta++;
         else if (arg == "--quiet") verbosityDelta--;
         else if (arg == "--log-type") {
-            ++i;
-            if (i == args.end()) throw UsageError("`--log-type' requires an argument");
-            setLogType(*i);
+            string s = getArg(arg, i, args.end());
+            setLogType(s);
         }
         else if (arg == "--no-build-output" || arg == "-Q")
-            buildVerbosity = lvlVomit;
+            settings.buildVerbosity = lvlVomit;
         else if (arg == "--print-build-trace")
-            printBuildTrace = true;
+            settings.printBuildTrace = true;
         else if (arg == "--help") {
             printHelp();
             return;
@@ -169,23 +177,23 @@ static void initAndRun(int argc, char * * argv)
             return;
         }
         else if (arg == "--keep-failed" || arg == "-K")
-            keepFailed = true;
+            settings.keepFailed = true;
         else if (arg == "--keep-going" || arg == "-k")
-            keepGoing = true;
+            settings.keepGoing = true;
         else if (arg == "--fallback")
-            tryFallback = true;
+            settings.set("build-fallback", "true");
         else if (arg == "--max-jobs" || arg == "-j")
-            maxBuildJobs = getIntArg<unsigned int>(arg, i, args.end());
+            settings.set("build-max-jobs", getArg(arg, i, args.end()));
         else if (arg == "--cores")
-            buildCores = getIntArg<unsigned int>(arg, i, args.end());
+            settings.set("build-cores", getArg(arg, i, args.end()));
         else if (arg == "--readonly-mode")
-            readOnlyMode = true;
+            settings.readOnlyMode = true;
         else if (arg == "--max-silent-time")
-            maxSilentTime = getIntArg<unsigned int>(arg, i, args.end());
+            settings.set("build-max-silent-time", getArg(arg, i, args.end()));
         else if (arg == "--timeout")
-            buildTimeout = getIntArg<unsigned int>(arg, i, args.end());
+            settings.set("build-timeout", getArg(arg, i, args.end()));
         else if (arg == "--no-build-hook")
-            useBuildHook = false;
+            settings.useBuildHook = false;
         else if (arg == "--show-trace")
             showTrace = true;
         else if (arg == "--option") {
@@ -193,68 +201,19 @@ static void initAndRun(int argc, char * * argv)
             string name = *i;
             ++i; if (i == args.end()) throw UsageError("`--option' requires two arguments");
             string value = *i;
-            overrideSetting(name, tokenizeString(value));
+            settings.set(name, value);
         }
         else remaining.push_back(arg);
     }
 
-    verbosityDelta += queryIntSetting("verbosity", lvlInfo);
     verbosity = (Verbosity) (verbosityDelta < 0 ? 0 : verbosityDelta);
-    
+
+    settings.update();
+
     run(remaining);
 
     /* Close the Nix database. */
     store.reset((StoreAPI *) 0);
-}
-
-
-bool setuidMode = false;
-
-
-static void setuidInit()
-{
-    /* Don't do anything if this is not a setuid binary. */
-    if (getuid() == geteuid() && getgid() == getegid()) return;
-
-    uid_t nixUid = geteuid();
-    gid_t nixGid = getegid();
-    
-    setuidCleanup();
-
-    /* Don't trust the current directory. */
-    if (chdir("/") == -1) abort();
-
-    /* Set the real (and preferably also the save) uid/gid to the
-       effective uid/gid.  This matters mostly when we're not using
-       build-users (bad!), since some builders (like Perl) complain
-       when real != effective.
-
-       On systems where setresuid is unavailable, we can't drop the
-       saved uid/gid.  This means that we could go back to the
-       original real uid (i.e., the uid of the caller).  That's not
-       really a problem, except maybe when we execute a builder and
-       we're not using build-users.  In that case, the builder may be
-       able to switch to the uid of the caller and possibly do bad
-       stuff.  But note that when not using build-users, the builder
-       could also modify the Nix executables (say, replace them by a
-       Trojan horse), so the problem is already there. */
-
-#if HAVE_SETRESUID
-    if (setresuid(nixUid, nixUid, nixUid)) abort();
-    if (setresgid(nixGid, nixGid, nixGid)) abort();
-#elif HAVE_SETREUID
-    /* Note: doesn't set saved uid/gid! */
-    fprintf(stderr, "warning: cannot set saved uid\n");
-    if (setreuid(nixUid, nixUid)) abort();
-    if (setregid(nixGid, nixGid)) abort();
-#else
-    /* Note: doesn't set real and saved uid/gid! */
-    fprintf(stderr, "warning: cannot set real and saved uids\n");
-    if (setuid(nixUid)) abort();
-    if (setgid(nixGid)) abort();
-#endif
-
-    setuidMode = true;
 }
 
 
@@ -263,6 +222,14 @@ static void * oomHandler(size_t requested)
 {
     /* Convert this to a proper C++ exception. */
     throw std::bad_alloc();
+}
+
+
+void showManPage(const string & name)
+{
+    string cmd = "man " + name;
+    if (system(cmd.c_str()) != 0)
+        throw Error(format("command `%1%' failed") % cmd);
 }
 
 
@@ -280,11 +247,6 @@ int main(int argc, char * * argv)
 
     argvSaved = argv;
 
-    /* If we're setuid, then we need to take some security precautions
-       right away. */
-    if (argc == 0) abort();
-    setuidInit();
-    
     /* Turn on buffering for cerr. */
 #if HAVE_PUBSETBUF
     std::cerr.rdbuf()->pubsetbuf(buf, sizeof(buf));
@@ -313,7 +275,7 @@ int main(int argc, char * * argv)
             throw;
         }
     } catch (UsageError & e) {
-        printMsg(lvlError, 
+        printMsg(lvlError,
             format(
                 "error: %1%\n"
                 "Try `%2% --help' for more information.")

@@ -9,12 +9,12 @@ use Fcntl ':flock';
 use Nix::Config;
 
 our @ISA = qw(Exporter);
-our @EXPORT = qw(readManifest writeManifest updateManifestDB addPatch);
+our @EXPORT = qw(readManifest writeManifest updateManifestDB addPatch deleteOldManifests parseNARInfo);
 
 
 sub addNAR {
     my ($narFiles, $storePath, $info) = @_;
-    
+
     $$narFiles{$storePath} = []
         unless defined $$narFiles{$storePath};
 
@@ -24,7 +24,7 @@ sub addNAR {
     foreach my $narFile (@{$narFileList}) {
         $found = 1 if $narFile->{url} eq $info->{url};
     }
-    
+
     push @{$narFileList}, $info if !$found;
 }
 
@@ -43,7 +43,7 @@ sub addPatch {
             $patch2->{url} eq $patch->{url} &&
             $patch2->{basePath} eq $patch->{basePath};
     }
-    
+
     push @{$patchList}, $patch if !$found;
 
     return !$found;
@@ -68,7 +68,7 @@ sub readManifest_ {
     my $manifestVersion = 2;
 
     my ($storePath, $url, $hash, $size, $basePath, $baseHash, $patchType);
-    my ($narHash, $narSize, $references, $deriver, $copyFrom, $system);
+    my ($narHash, $narSize, $references, $deriver, $copyFrom, $system, $compressionType);
 
     while (<MANIFEST>) {
         chomp;
@@ -93,10 +93,11 @@ sub readManifest_ {
                 undef $system;
                 $references = "";
                 $deriver = "";
-	    }
+                $compressionType = "bzip2";
+            }
 
         } else {
-            
+
             if (/^\}$/) {
                 $inside = 0;
 
@@ -107,6 +108,7 @@ sub readManifest_ {
                         , references => $references
                         , deriver => $deriver
                         , system => $system
+                        , compressionType => $compressionType
                         });
                 }
 
@@ -120,11 +122,12 @@ sub readManifest_ {
                 }
 
             }
-            
+
             elsif (/^\s*StorePath:\s*(\/\S+)\s*$/) { $storePath = $1; }
             elsif (/^\s*CopyFrom:\s*(\/\S+)\s*$/) { $copyFrom = $1; }
             elsif (/^\s*Hash:\s*(\S+)\s*$/) { $hash = $1; }
             elsif (/^\s*URL:\s*(\S+)\s*$/) { $url = $1; }
+            elsif (/^\s*Compression:\s*(\S+)\s*$/) { $compressionType = $1; }
             elsif (/^\s*Size:\s*(\d+)\s*$/) { $size = $1; }
             elsif (/^\s*BasePath:\s*(\/\S+)\s*$/) { $basePath = $1; }
             elsif (/^\s*BaseHash:\s*(\S+)\s*$/) { $baseHash = $1; }
@@ -172,6 +175,7 @@ sub writeManifest {
             print MANIFEST "{\n";
             print MANIFEST "  StorePath: $storePath\n";
             print MANIFEST "  NarURL: $narFile->{url}\n";
+            print MANIFEST "  Compression: $narFile->{compressionType}\n";
             print MANIFEST "  Hash: $narFile->{hash}\n" if defined $narFile->{hash};
             print MANIFEST "  Size: $narFile->{size}\n" if defined $narFile->{size};
             print MANIFEST "  NarHash: $narFile->{narHash}\n";
@@ -184,7 +188,7 @@ sub writeManifest {
             print MANIFEST "}\n";
         }
     }
-    
+
     foreach my $storePath (sort (keys %{$patches})) {
         my $patchList = $$patches{$storePath};
         foreach my $patch (@{$patchList}) {
@@ -201,8 +205,8 @@ sub writeManifest {
             print MANIFEST "}\n";
         }
     }
-    
-    
+
+
     close MANIFEST;
 
     rename("$manifest.tmp", $manifest)
@@ -211,11 +215,11 @@ sub writeManifest {
 
     # Create a bzipped manifest.
     unless (defined $noCompress) {
-	system("$Nix::Config::bzip2 < $manifest > $manifest.bz2.tmp") == 0
-	    or die "cannot compress manifest";
+        system("$Nix::Config::bzip2 < $manifest > $manifest.bz2.tmp") == 0
+            or die "cannot compress manifest";
 
-	rename("$manifest.bz2.tmp", "$manifest.bz2")
-	    or die "cannot rename $manifest.bz2.tmp: $!";
+        rename("$manifest.bz2.tmp", "$manifest.bz2")
+            or die "cannot rename $manifest.bz2.tmp: $!";
     }
 }
 
@@ -224,8 +228,9 @@ sub updateManifestDB {
     my $manifestDir = $Nix::Config::manifestDir;
 
     mkpath($manifestDir);
-    
-    my $dbPath = "$manifestDir/cache.sqlite";
+
+    unlink "$manifestDir/cache.sqlite"; # remove obsolete cache
+    my $dbPath = "$manifestDir/cache-v2.sqlite";
 
     # Open/create the database.
     our $dbh = DBI->connect("dbi:SQLite:dbname=$dbPath", "", "")
@@ -245,13 +250,14 @@ sub updateManifestDB {
             timestamp integer not null
         );
 EOF
-    
+
     $dbh->do(<<EOF);
         create table if not exists NARs (
             id               integer primary key autoincrement not null,
             manifest         integer not null,
             storePath        text not null,
             url              text not null,
+            compressionType  text not null,
             hash             text,
             size             integer,
             narHash          text,
@@ -292,8 +298,8 @@ EOF
     flock(MAINLOCK, LOCK_EX) or die;
 
     our $insertNAR = $dbh->prepare(
-        "insert into NARs(manifest, storePath, url, hash, size, narHash, " .
-        "narSize, refs, deriver, system) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)") or die;
+        "insert into NARs(manifest, storePath, url, compressionType, hash, size, narHash, " .
+        "narSize, refs, deriver, system) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)") or die;
 
     our $insertPatch = $dbh->prepare(
         "insert into Patches(manifest, storePath, basePath, baseHash, url, hash, " .
@@ -304,7 +310,7 @@ EOF
     # Read each manifest in $manifestDir and add it to the database,
     # unless we've already done so on a previous run.
     my %seen;
-    
+
     for my $manifestLink (glob "$manifestDir/*.nixmanifest") {
         my $manifest = Cwd::abs_path($manifestLink);
         next unless -f $manifest;
@@ -316,9 +322,9 @@ EOF
             {}, $manifest, $timestamp)} == 1;
 
         print STDERR "caching $manifest...\n";
-        
+
         $dbh->do("delete from Manifests where path = ?", {}, $manifest);
-                 
+
         $dbh->do("insert into Manifests(path, timestamp) values (?, ?)",
                  {}, $manifest, $timestamp);
 
@@ -327,11 +333,11 @@ EOF
         sub addNARToDB {
             my ($storePath, $narFile) = @_;
             $insertNAR->execute(
-                $id, $storePath, $narFile->{url}, $narFile->{hash}, $narFile->{size},
-                $narFile->{narHash}, $narFile->{narSize}, $narFile->{references},
+                $id, $storePath, $narFile->{url}, $narFile->{compressionType}, $narFile->{hash},
+                $narFile->{size}, $narFile->{narHash}, $narFile->{narSize}, $narFile->{references},
                 $narFile->{deriver}, $narFile->{system});
         };
-        
+
         sub addPatchToDB {
             my ($storePath, $patch) = @_;
             $insertPatch->execute(
@@ -341,7 +347,7 @@ EOF
         };
 
         my $version = readManifest_($manifest, \&addNARToDB, \&addPatchToDB);
-        
+
         if ($version < 3) {
             die "you have an old-style or corrupt manifest `$manifestLink'; please delete it\n";
         }
@@ -361,6 +367,62 @@ EOF
     close MAINLOCK;
 
     return $dbh;
+}
+
+
+
+# Delete all old manifests downloaded from a given URL.
+sub deleteOldManifests {
+    my ($url, $curUrlFile) = @_;
+    for my $urlFile (glob "$Nix::Config::manifestDir/*.url") {
+        next if defined $curUrlFile && $urlFile eq $curUrlFile;
+        open URL, "<$urlFile" or die;
+        my $url2 = <URL>;
+        chomp $url2;
+        close URL;
+        next unless $url eq $url2;
+        my $base = $urlFile; $base =~ s/.url$//;
+        unlink "${base}.url";
+        unlink "${base}.nixmanifest";
+    }
+}
+
+
+# Parse a NAR info file.
+sub parseNARInfo {
+    my ($storePath, $content) = @_;
+
+    my ($storePath2, $url, $fileHash, $fileSize, $narHash, $narSize, $deriver, $system);
+    my $compression = "bzip2";
+    my @refs;
+
+    foreach my $line (split "\n", $content) {
+        return undef unless $line =~ /^(.*): (.*)$/;
+        if ($1 eq "StorePath") { $storePath2 = $2; }
+        elsif ($1 eq "URL") { $url = $2; }
+        elsif ($1 eq "Compression") { $compression = $2; }
+        elsif ($1 eq "FileHash") { $fileHash = $2; }
+        elsif ($1 eq "FileSize") { $fileSize = int($2); }
+        elsif ($1 eq "NarHash") { $narHash = $2; }
+        elsif ($1 eq "NarSize") { $narSize = int($2); }
+        elsif ($1 eq "References") { @refs = split / /, $2; }
+        elsif ($1 eq "Deriver") { $deriver = $2; }
+        elsif ($1 eq "System") { $system = $2; }
+    }
+
+    return undef if $storePath ne $storePath2 || !defined $url || !defined $narHash;
+
+    return
+        { url => $url
+        , compression => $compression
+        , fileHash => $fileHash
+        , fileSize => $fileSize
+        , narHash => $narHash
+        , narSize => $narSize
+        , refs => [ @refs ]
+        , deriver => $deriver
+        , system => $system
+        };
 }
 
 

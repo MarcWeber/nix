@@ -8,7 +8,6 @@
 #include "util.hh"
 #include "store-api.hh"
 #include "common-opts.hh"
-#include "help.txt.hh"
 
 #include <map>
 #include <iostream>
@@ -19,16 +18,14 @@ using namespace nix;
 
 void printHelp()
 {
-    std::cout << string((char *) helpText);
+    showManPage("nix-instantiate");
 }
 
 
 static Expr * parseStdin(EvalState & state)
 {
     startNest(nest, lvlTalkative, format("parsing standard input"));
-    string s, s2;
-    while (getline(std::cin, s2)) s += s2 + "\n";
-    return state.parseExprFromString(s, absPath("."));
+    return state.parseExprFromString(drainFD(0), absPath("."));
 }
 
 
@@ -59,7 +56,7 @@ void processExpr(EvalState & state, const Strings & attrPaths,
                 }
             else {
                 DrvInfos drvs;
-                getDerivations(state, v, "", autoArgs, drvs);
+                getDerivations(state, v, "", autoArgs, drvs, false);
                 foreach (DrvInfos::iterator, i, drvs) {
                     Path drvPath = i->queryDrvPath(state);
                     if (gcRoot == "")
@@ -96,11 +93,11 @@ void run(Strings args)
         if (arg == "-")
             readStdin = true;
         else if (arg == "--eval-only") {
-            readOnlyMode = true;
+            settings.readOnlyMode = true;
             evalOnly = true;
         }
         else if (arg == "--parse-only") {
-            readOnlyMode = true;
+            settings.readOnlyMode = true;
             parseOnly = evalOnly = true;
         }
         else if (arg == "--find-file")
@@ -127,6 +124,8 @@ void run(Strings args)
             xmlOutputSourceLocation = false;
         else if (arg == "--strict")
             strict = true;
+        else if (arg == "--repair")
+            state.repair = true;
         else if (arg[0] == '-')
             throw UsageError(format("unknown flag `%1%'") % arg);
         else

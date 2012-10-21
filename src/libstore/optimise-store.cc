@@ -19,7 +19,7 @@ static void makeWritable(const Path & path)
 {
     struct stat st;
     if (lstat(path.c_str(), &st))
-	throw SysError(format("getting attributes of path `%1%'") % path);
+        throw SysError(format("getting attributes of path `%1%'") % path);
     if (S_ISDIR(st.st_mode) || S_ISREG(st.st_mode)) makeMutable(path);
     if (chmod(path.c_str(), st.st_mode | S_IWUSR) == -1)
         throw SysError(format("changing writability of `%1%'") % path);
@@ -33,21 +33,12 @@ struct MakeReadOnly
     ~MakeReadOnly()
     {
         try {
-            /* This will make the path read-only (and restore the
-               immutable bit on platforms that support it). */
+            /* This will make the path read-only. */
             if (path != "") canonicalisePathMetaData(path, false);
         } catch (...) {
             ignoreException();
         }
     }
-};
-
-
-struct MakeImmutable
-{
-    Path path;
-    MakeImmutable(const Path & path) : path(path) { }
-    ~MakeImmutable() { makeImmutable(path); }
 };
 
 
@@ -57,22 +48,22 @@ void LocalStore::optimisePath_(OptimiseStats & stats, const Path & path)
     
     struct stat st;
     if (lstat(path.c_str(), &st))
-	throw SysError(format("getting attributes of path `%1%'") % path);
+        throw SysError(format("getting attributes of path `%1%'") % path);
 
     if (S_ISDIR(st.st_mode)) {
         Strings names = readDirectory(path);
-	foreach (Strings::iterator, i, names)
-	    optimisePath_(stats, path + "/" + *i);
+        foreach (Strings::iterator, i, names)
+            optimisePath_(stats, path + "/" + *i);
         return;
     }
-    
+
     /* We can hard link regular files and maybe symlinks. */
     if (!S_ISREG(st.st_mode)
 #if CAN_LINK_SYMLINK
         && !S_ISLNK(st.st_mode)
 #endif
         ) return;
-        
+
     /* Sometimes SNAFUs can cause files in the Nix store to be
        modified, in particular when running programs as root under
        NixOS (example: $fontconfig/var/cache being modified).  Skip
@@ -101,7 +92,6 @@ void LocalStore::optimisePath_(OptimiseStats & stats, const Path & path)
     if (!pathExists(linkPath)) {
         /* Nope, create a hard link in the links directory. */
         makeMutable(path);
-        MakeImmutable mk1(path);
         if (link(path.c_str(), linkPath.c_str()) == 0) return;
         if (errno != EEXIST)
             throw SysError(format("cannot link `%1%' to `%2%'") % linkPath % path);
@@ -113,14 +103,14 @@ void LocalStore::optimisePath_(OptimiseStats & stats, const Path & path)
        current file with a hard link to that file. */
     struct stat stLink;
     if (lstat(linkPath.c_str(), &stLink))
-	throw SysError(format("getting attributes of path `%1%'") % linkPath);
-    
+        throw SysError(format("getting attributes of path `%1%'") % linkPath);
+
     stats.sameContents++;
     if (st.st_ino == stLink.st_ino) {
         printMsg(lvlDebug, format("`%1%' is already linked to `%2%'") % path % linkPath);
         return;
     }
-        
+
     printMsg(lvlTalkative, format("linking `%1%' to `%2%'") % path % linkPath);
 
     /* Make the containing directory writable, but only if it's not
@@ -128,63 +118,47 @@ void LocalStore::optimisePath_(OptimiseStats & stats, const Path & path)
        permissions). */
     bool mustToggle = !isStorePath(path);
     if (mustToggle) makeWritable(dirOf(path));
-            
+
     /* When we're done, make the directory read-only again and reset
        its timestamp back to 0. */
     MakeReadOnly makeReadOnly(mustToggle ? dirOf(path) : "");
 
     /* If ‘linkPath’ is immutable, we can't create hard links to it,
-       so make it mutable first (and make it immutable again when
-       we're done).  We also have to make ‘path’ mutable, otherwise
-       rename() will fail to delete it. */
+       so make it mutable first.  We also have to make ‘path’ mutable,
+       otherwise rename() will fail to delete it. */
     makeMutable(path);
-    MakeImmutable mk2(path);
+    makeMutable(linkPath);
 
-    /* Another process might be doing the same thing (creating a new
-       link to ‘linkPath’) and make ‘linkPath’ immutable before we're
-       done.  In that case, just retry. */
-    unsigned int retries = 1024;
-    while (--retries > 0) {
-        makeMutable(linkPath);
-        MakeImmutable mk1(linkPath);
+    Path tempLink = (format("%1%/.tmp-link-%2%-%3%")
+        % settings.nixStore % getpid() % rand()).str();
 
-        Path tempLink = (format("%1%/.tmp-link-%2%-%3%")
-            % nixStore % getpid() % rand()).str();
-
-        if (link(linkPath.c_str(), tempLink.c_str()) == -1) {
-            if (errno == EMLINK) {
-                /* Too many links to the same file (>= 32000 on most
-                   file systems).  This is likely to happen with empty
-                   files.  Just shrug and ignore. */
-                if (st.st_size)
-                    printMsg(lvlInfo, format("`%1%' has maximum number of links") % linkPath);
-                return;
-            }
-            if (errno == EPERM) continue;
-            throw SysError(format("cannot link `%1%' to `%2%'") % tempLink % linkPath);
+    if (link(linkPath.c_str(), tempLink.c_str()) == -1) {
+        if (errno == EMLINK) {
+            /* Too many links to the same file (>= 32000 on most file
+               systems).  This is likely to happen with empty files.
+               Just shrug and ignore. */
+            if (st.st_size)
+                printMsg(lvlInfo, format("`%1%' has maximum number of links") % linkPath);
+            return;
         }
-
-        /* Atomically replace the old file with the new hard link. */
-        if (rename(tempLink.c_str(), path.c_str()) == -1) {
-            if (unlink(tempLink.c_str()) == -1)
-                printMsg(lvlError, format("unable to unlink `%1%'") % tempLink);
-            if (errno == EMLINK) {
-                /* Some filesystems generate too many links on the
-                   rename, rather than on the original link.
-                   (Probably it temporarily increases the st_nlink
-                   field before decreasing it again.) */
-                if (st.st_size)
-                    printMsg(lvlInfo, format("`%1%' has maximum number of links") % linkPath);
-                return;
-            }
-            if (errno == EPERM) continue;
-            throw SysError(format("cannot rename `%1%' to `%2%'") % tempLink % path);
-        }
-
-        break;
+        throw SysError(format("cannot link `%1%' to `%2%'") % tempLink % linkPath);
     }
 
-    if (retries == 0) throw Error(format("cannot link `%1%' to `%2%'") % path % linkPath);
+    /* Atomically replace the old file with the new hard link. */
+    if (rename(tempLink.c_str(), path.c_str()) == -1) {
+        if (unlink(tempLink.c_str()) == -1)
+            printMsg(lvlError, format("unable to unlink `%1%'") % tempLink);
+        if (errno == EMLINK) {
+            /* Some filesystems generate too many links on the rename,
+               rather than on the original link.  (Probably it
+               temporarily increases the st_nlink field before
+               decreasing it again.) */
+            if (st.st_size)
+                printMsg(lvlInfo, format("`%1%' has maximum number of links") % linkPath);
+            return;
+        }
+        throw SysError(format("cannot rename `%1%' to `%2%'") % tempLink % path);
+    }
 
     stats.filesLinked++;
     stats.bytesFreed += st.st_size;
@@ -194,7 +168,7 @@ void LocalStore::optimisePath_(OptimiseStats & stats, const Path & path)
 
 void LocalStore::optimiseStore(OptimiseStats & stats)
 {
-    PathSet paths = queryValidPaths();
+    PathSet paths = queryAllValidPaths();
 
     foreach (PathSet::iterator, i, paths) {
         addTempRoot(*i);
@@ -207,10 +181,8 @@ void LocalStore::optimiseStore(OptimiseStats & stats)
 
 void LocalStore::optimisePath(const Path & path)
 {
-    if (queryBoolSetting("auto-optimise-store", true)) {
-        OptimiseStats stats;
-        optimisePath_(stats, path);
-    }
+    OptimiseStats stats;
+    if (settings.autoOptimiseStore) optimisePath_(stats, path);
 }
 
 

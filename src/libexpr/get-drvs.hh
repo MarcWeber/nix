@@ -31,6 +31,8 @@ private:
 
     bool metaInfoRead;
     MetaInfo meta;
+
+    bool failed; // set if we get an AssertionError
     
 public:
     string name;
@@ -40,7 +42,7 @@ public:
     /* !!! make this private */
     Bindings * attrs;
 
-    DrvInfo() : metaInfoRead(false), attrs(0) { };
+    DrvInfo() : metaInfoRead(false), failed(false), attrs(0) { };
 
     string queryDrvPath(EvalState & state) const;
     string queryOutPath(EvalState & state) const;
@@ -58,6 +60,9 @@ public:
     }
 
     void setMetaInfo(const MetaInfo & meta);
+
+    void setFailed() { failed = true; };
+    bool hasFailed() { return failed; };
 };
 
 
@@ -70,10 +75,12 @@ typedef list<DrvInfo> DrvInfos;
 
 /* If value `v' denotes a derivation, store information about the
    derivation in `drv' and return true.  Otherwise, return false. */
-bool getDerivation(EvalState & state, Value & v, DrvInfo & drv);
+bool getDerivation(EvalState & state, Value & v, DrvInfo & drv,
+    bool ignoreAssertionFailures);
 
 void getDerivations(EvalState & state, Value & v, const string & pathPrefix,
-    Bindings & autoArgs, DrvInfos & drvs);
+    Bindings & autoArgs, DrvInfos & drvs,
+    bool ignoreAssertionFailures);
 
  
 }

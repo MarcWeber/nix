@@ -25,7 +25,7 @@ using namespace nix;
    disconnects and immediately kill any ongoing builds.  On platforms
    that lack it, we only notice the disconnection the next time we try
    to write to the client.  So if you have a builder that never
-   generates output on stdout/stderr, the worker will never notice
+   generates output on stdout/stderr, the daemon will never notice
    that the client has disconnected until the builder terminates. */
 #ifdef O_ASYNC
 #define HAVE_HUP_NOTIFICATION
@@ -95,7 +95,7 @@ static bool isFarSideClosed(int socket)
         throw Error("EOF expected (protocol error?)");
     else if (rd == -1 && errno != ECONNRESET)
         throw SysError("expected connection reset or EOF");
-    
+
     return true;
 }
 
@@ -185,7 +185,7 @@ static void stopWork(bool success = true, const string & msg = "", unsigned int 
        we're either sending or receiving from the client, so we'll be
        notified of client death anyway. */
     setSigPollAction(false);
-    
+
     canSendStderr = false;
 
     if (success)
@@ -220,7 +220,7 @@ struct TunnelSource : BufferedSource
            so we have to disable the SIGPOLL handler. */
         setSigPollAction(false);
         canSendStderr = false;
-        
+
         writeInt(STDERR_READ, to);
         writeInt(len, to);
         to.flush();
@@ -279,7 +279,7 @@ static void performOp(unsigned int clientVersion,
 {
     switch (op) {
 
-#if 0        
+#if 0
     case wopQuit: {
         /* Close the database. */
         store.reset((StoreAPI *) 0);
@@ -297,12 +297,30 @@ static void performOp(unsigned int clientVersion,
         break;
     }
 
+    case wopQueryValidPaths: {
+        PathSet paths = readStorePaths<PathSet>(from);
+        startWork();
+        PathSet res = store->queryValidPaths(paths);
+        stopWork();
+        writeStrings(res, to);
+        break;
+    }
+
     case wopHasSubstitutes: {
         Path path = readStorePath(from);
         startWork();
-        bool result = store->hasSubstitutes(path);
+        PathSet res = store->querySubstitutablePaths(singleton<PathSet>(path));
         stopWork();
-        writeInt(result, to);
+        writeInt(res.find(path) != res.end(), to);
+        break;
+    }
+
+    case wopQuerySubstitutablePaths: {
+        PathSet paths = readStorePaths<PathSet>(from);
+        startWork();
+        PathSet res = store->querySubstitutablePaths(paths);
+        stopWork();
+        writeStrings(res, to);
         break;
     }
 
@@ -373,7 +391,7 @@ static void performOp(unsigned int clientVersion,
 
         SavingSourceAdapter savedNAR(from);
         RetrieveRegularNARSink savedRegular;
-        
+
         if (recursive) {
             /* Get the entire NAR dump from the client and save it to
                a string so that we can pass it to
@@ -382,13 +400,13 @@ static void performOp(unsigned int clientVersion,
             parseDump(sink, savedNAR);
         } else
             parseDump(savedRegular, from);
-            
+
         startWork();
         if (!savedRegular.regular) throw Error("regular file expected");
         Path path = dynamic_cast<LocalStore *>(store.get())
             ->addToStoreFromDump(recursive ? savedNAR.s : savedRegular.s, baseName, recursive, hashAlgo);
         stopWork();
-        
+
         writeString(path, to);
         break;
     }
@@ -494,41 +512,45 @@ static void performOp(unsigned int clientVersion,
         }
 
         GCResults results;
-        
+
         startWork();
         if (options.ignoreLiveness)
             throw Error("you are not allowed to ignore liveness");
         store->collectGarbage(options, results);
         stopWork();
-        
+
         writeStrings(results.paths, to);
         writeLongLong(results.bytesFreed, to);
         writeLongLong(0, to); // obsolete
-        
+
         break;
     }
 
     case wopSetOptions: {
-        keepFailed = readInt(from) != 0;
-        keepGoing = readInt(from) != 0;
-        tryFallback = readInt(from) != 0;
+        settings.keepFailed = readInt(from) != 0;
+        settings.keepGoing = readInt(from) != 0;
+        settings.tryFallback = readInt(from) != 0;
         verbosity = (Verbosity) readInt(from);
-        maxBuildJobs = readInt(from);
-        maxSilentTime = readInt(from);
+        settings.maxBuildJobs = readInt(from);
+        settings.maxSilentTime = readInt(from);
         if (GET_PROTOCOL_MINOR(clientVersion) >= 2)
-            useBuildHook = readInt(from) != 0;
+            settings.useBuildHook = readInt(from) != 0;
         if (GET_PROTOCOL_MINOR(clientVersion) >= 4) {
-            buildVerbosity = (Verbosity) readInt(from);
+            settings.buildVerbosity = (Verbosity) readInt(from);
             logType = (LogType) readInt(from);
-            printBuildTrace = readInt(from) != 0;
+            settings.printBuildTrace = readInt(from) != 0;
         }
         if (GET_PROTOCOL_MINOR(clientVersion) >= 6)
-            buildCores = readInt(from);
-        if (GET_PROTOCOL_MINOR(clientVersion) >= 10) {
-            int x = readInt(from);
-            Strings ss;
-            ss.push_back(x == 0 ? "false" : "true");
-            overrideSetting("build-use-substitutes", ss);
+            settings.buildCores = readInt(from);
+        if (GET_PROTOCOL_MINOR(clientVersion) >= 10)
+            settings.useSubstitutes = readInt(from) != 0;
+        if (GET_PROTOCOL_MINOR(clientVersion) >= 12) {
+            unsigned int n = readInt(from);
+            for (unsigned int i = 0; i < n; i++) {
+                string name = readString(from);
+                string value = readString(from);
+                settings.set("untrusted-" + name, value);
+            }
         }
         startWork();
         stopWork();
@@ -538,23 +560,43 @@ static void performOp(unsigned int clientVersion,
     case wopQuerySubstitutablePathInfo: {
         Path path = absPath(readString(from));
         startWork();
-        SubstitutablePathInfo info;
-        bool res = store->querySubstitutablePathInfo(path, info);
+        SubstitutablePathInfos infos;
+        store->querySubstitutablePathInfos(singleton<PathSet>(path), infos);
         stopWork();
-        writeInt(res ? 1 : 0, to);
-        if (res) {
-            writeString(info.deriver, to);
-            writeStrings(info.references, to);
-            writeLongLong(info.downloadSize, to);
+        SubstitutablePathInfos::iterator i = infos.find(path);
+        if (i == infos.end())
+            writeInt(0, to);
+        else {
+            writeInt(1, to);
+            writeString(i->second.deriver, to);
+            writeStrings(i->second.references, to);
+            writeLongLong(i->second.downloadSize, to);
             if (GET_PROTOCOL_MINOR(clientVersion) >= 7)
-                writeLongLong(info.narSize, to);
+                writeLongLong(i->second.narSize, to);
         }
         break;
     }
-            
-    case wopQueryValidPaths: {
+
+    case wopQuerySubstitutablePathInfos: {
+        PathSet paths = readStorePaths<PathSet>(from);
         startWork();
-        PathSet paths = store->queryValidPaths();
+        SubstitutablePathInfos infos;
+        store->querySubstitutablePathInfos(paths, infos);
+        stopWork();
+        writeInt(infos.size(), to);
+        foreach (SubstitutablePathInfos::iterator, i, infos) {
+            writeString(i->first, to);
+            writeString(i->second.deriver, to);
+            writeStrings(i->second.references, to);
+            writeLongLong(i->second.downloadSize, to);
+            writeLongLong(i->second.narSize, to);
+        }
+        break;
+    }
+
+    case wopQueryAllValidPaths: {
+        startWork();
+        PathSet paths = store->queryAllValidPaths();
         stopWork();
         writeStrings(paths, to);
         break;
@@ -599,7 +641,7 @@ static void performOp(unsigned int clientVersion,
 static void processConnection()
 {
     canSendStderr = false;
-    myPid = getpid();    
+    myPid = getpid();
     writeToStderr = tunnelStderr;
 
 #ifdef HAVE_HUP_NOTIFICATION
@@ -635,7 +677,7 @@ static void processConnection()
         /* Prevent users from doing something very dangerous. */
         if (geteuid() == 0 &&
             querySetting("build-users-group", "") == "")
-            throw Error("if you run `nix-worker' as root, then you MUST set `build-users-group'!");
+            throw Error("if you run `nix-daemon' as root, then you MUST set `build-users-group'!");
 #endif
 
         /* Open the store. */
@@ -643,7 +685,7 @@ static void processConnection()
 
         stopWork();
         to.flush();
-        
+
     } catch (Error & e) {
         stopWork(false, e.msg());
         to.flush();
@@ -652,7 +694,7 @@ static void processConnection()
 
     /* Process client requests. */
     unsigned int opCount = 0;
-    
+
     while (true) {
         WorkerOp op;
         try {
@@ -682,7 +724,7 @@ static void processConnection()
         assert(!canSendStderr);
     };
 
-    printMsg(lvlError, format("%1% worker operations") % opCount);
+    printMsg(lvlError, format("%1% operations") % opCount);
 }
 
 
@@ -724,13 +766,13 @@ static void daemonLoop()
 
     /* Otherwise, create and bind to a Unix domain socket. */
     else {
-    
+
         /* Create and bind to a Unix domain socket. */
         fdSocket = socket(PF_UNIX, SOCK_STREAM, 0);
         if (fdSocket == -1)
             throw SysError("cannot create Unix domain socket");
 
-        string socketPath = nixStateDir + DEFAULT_SOCKET_PATH;
+        string socketPath = settings.nixStateDir + DEFAULT_SOCKET_PATH;
 
         createDirs(dirOf(socketPath));
 
@@ -739,7 +781,7 @@ static void daemonLoop()
            relative path name. */
         chdir(dirOf(socketPath).c_str());
         Path socketPathRel = "./" + baseNameOf(socketPath);
-    
+
         struct sockaddr_un addr;
         addr.sun_family = AF_UNIX;
         if (socketPathRel.size() >= sizeof(addr.sun_path))
@@ -764,7 +806,7 @@ static void daemonLoop()
     }
 
     closeOnExec(fdSocket);
-        
+
     /* Loop accepting connections. */
     while (1) {
 
@@ -772,7 +814,7 @@ static void daemonLoop()
             /* Important: the server process *cannot* open the SQLite
                database, because it doesn't like forks very much. */
             assert(!store);
-            
+
             /* Accept a connection. */
             struct sockaddr_un remoteAddr;
             socklen_t remoteAddrLen = sizeof(remoteAddr);
@@ -781,14 +823,14 @@ static void daemonLoop()
                 (struct sockaddr *) &remoteAddr, &remoteAddrLen);
             checkInterrupt();
             if (remote == -1) {
-		if (errno == EINTR)
-		    continue;
-		else
-		    throw SysError("accepting connection");
+                if (errno == EINTR)
+                    continue;
+                else
+                    throw SysError("accepting connection");
             }
 
             closeOnExec(remote);
-            
+
             /* Get the identity of the caller, if possible. */
             uid_t clientUid = -1;
             pid_t clientPid = -1;
@@ -803,20 +845,20 @@ static void daemonLoop()
 #endif
 
             printMsg(lvlInfo, format("accepted connection from pid %1%, uid %2%") % clientPid % clientUid);
-            
+
             /* Fork a child to handle the connection. */
             pid_t child;
             child = fork();
-    
+
             switch (child) {
-        
+
             case -1:
                 throw SysError("unable to fork");
 
             case 0:
                 try { /* child */
 
-                    /* Background the worker. */
+                    /* Background the daemon. */
                     if (setsid() == -1)
                         throw SysError(format("creating a new session"));
 
@@ -828,16 +870,12 @@ static void daemonLoop()
                         string processName = int2String(clientPid);
                         strncpy(argvSaved[1], processName.c_str(), strlen(argvSaved[1]));
                     }
-                    
-                    /* Since the daemon can be long-running, the
-                       settings may have changed.  So force a reload. */
-                    reloadSettings();
-                    
+
                     /* Handle the connection. */
                     from.fd = remote;
                     to.fd = remote;
                     processConnection();
-                    
+
                 } catch (std::exception & e) {
                     std::cerr << format("child error: %1%\n") % e.what();
                 }
@@ -855,42 +893,22 @@ static void daemonLoop()
 
 void run(Strings args)
 {
-    bool slave = false;
     bool daemon = false;
-    
+
     for (Strings::iterator i = args.begin(); i != args.end(); ) {
         string arg = *i++;
-        if (arg == "--slave") slave = true;
-        if (arg == "--daemon") daemon = true;
+        if (arg == "--daemon") /* ignored for backwards compatibility */;
     }
 
-    if (slave) {
-        /* This prevents us from receiving signals from the terminal
-           when we're running in setuid mode. */
-        if (setsid() == -1)
-            throw SysError(format("creating a new session"));
-
-        processConnection();
-    }
-
-    else if (daemon) {
-        if (setuidMode)
-            throw Error("daemon cannot be started in setuid mode");
-        chdir("/");
-        daemonLoop();
-    }
-
-    else
-        throw Error("must be run in either --slave or --daemon mode");
+    chdir("/");
+    daemonLoop();
 }
 
-
-#include "help.txt.hh"
 
 void printHelp()
 {
-    std::cout << string((char *) helpText);
+    showManPage("nix-daemon");
 }
 
 
-string programId = "nix-worker";
+string programId = "nix-daemon";

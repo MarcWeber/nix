@@ -142,6 +142,7 @@ EvalState::EvalState()
     , baseEnv(allocEnv(128))
     , baseEnvDispl(0)
     , staticBaseEnv(false, 0)
+    , repair(false)
 {
     nrEnvs = nrValuesInEnvs = nrValues = nrListElems = 0;
     nrAttrsets = nrOpUpdates = nrOpUpdateValuesCopied = 0;
@@ -180,9 +181,9 @@ EvalState::EvalState()
 
     /* Initialise the Nix expression search path. */
     searchPathInsertionPoint = searchPath.end();
-    Strings paths = tokenizeString(getEnv("NIX_PATH", ""), ":");
+    Strings paths = tokenizeString<Strings>(getEnv("NIX_PATH", ""), ":");
     foreach (Strings::iterator, i, paths) addToSearchPath(*i);
-    addToSearchPath("nix=" + nixDataDir + "/nix/corepkgs");
+    addToSearchPath("nix=" + settings.nixDataDir + "/nix/corepkgs");
     searchPathInsertionPoint = searchPath.begin();
 
     createBaseEnv();
@@ -1104,9 +1105,9 @@ string EvalState::coerceToString(Value & v, PathSet & context,
         if (srcToStore[path] != "")
             dstPath = srcToStore[path];
         else {
-            dstPath = readOnlyMode
+            dstPath = settings.readOnlyMode
                 ? computeStorePathForPath(path).first
-                : store->addToStore(path);
+                : store->addToStore(path, true, htSHA256, defaultPathFilter, repair);
             srcToStore[path] = dstPath;
             printMsg(lvlChatty, format("copied source `%1%' -> `%2%'")
                 % path % dstPath);

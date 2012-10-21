@@ -286,12 +286,16 @@ MakeError(Interrupted, BaseError)
 
 
 /* String tokenizer. */
-Strings tokenizeString(const string & s, const string & separators = " \t\n\r");
+template<class C> C tokenizeString(const string & s, const string & separators = " \t\n\r");
 
 
 /* Concatenate the given strings with a separator between the
    elements. */
 string concatStringsSep(const string & sep, const Strings & ss);
+
+
+/* Remove trailing whitespace from a string. */
+string chomp(const string & s);
 
 
 /* Convert the exit status of a child as returned by wait() into an
@@ -326,6 +330,12 @@ string parseString(std::istream & str);
 
 /* Utility function used to parse legacy ATerms. */
 bool endOfList(std::istream & str);
+
+
+/* Escape a string that contains octal-encoded escape codes such as
+   used in /etc/fstab and /proc/mounts (e.g. "foo\040bar" decodes to
+   "foo bar"). */
+string decodeOctalEscaped(const string & s);
 
 
 /* Exception handling in destructors: print an error message, then

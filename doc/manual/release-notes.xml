@@ -8,6 +8,58 @@
 
 <!--==================================================================-->
 
+<section xml:id="ssec-relnotes-1.2"><title>Release 1.2 (TBA)</title>
+
+<para>This release has the following improvements and changes:</para>
+
+<itemizedlist>
+
+  <listitem>
+    <para>Dashes are now valid as part of identifiers and attribute
+    names.</para>
+  </listitem>
+
+  <listitem>
+    <para>The new operation <command>nix-store --repair-path</command>
+    allows corrupted or missing store paths to be repaired by
+    redownloading them.  <command>nix-store --verify --check-contents
+    --repair</command> will scan and repair all paths in the Nix
+    store.  Similarly, <command>nix-env</command>,
+    <command>nix-build</command>, <command>nix-instantiate</command>
+    and <command>nix-store --realise</command> have a
+    <option>--repair</option> flag to detect and fix bad paths by
+    rebuilding or redownloading them.</para>
+  </listitem>
+
+  <listitem>
+    <para>Nix no longer sets the immutable bit on files in the Nix
+    store.  Instead, the recommended way to guard the Nix store
+    against accidental modification on Linux is to make it a read-only
+    bind mount, like this:
+
+<screen>
+$ mount --bind /nix/store /nix/store
+$ mount -o remount,ro,bind /nix/store
+</screen>
+
+    Nix will automatically make <filename>/nix/store</filename>
+    writable as needed (using a private mount namespace) to allow
+    modifications.</para>
+  </listitem>
+
+  <listitem>
+    <para>The command <command>nix-worker</command> has been renamed
+    to <command>nix-daemon</command>.  Support for running the Nix
+    worker in “slave” mode has been removed.</para>
+  </listitem>
+
+</itemizedlist>
+
+</section>
+
+
+<!--==================================================================-->
+
 <section xml:id="ssec-relnotes-1.1"><title>Release 1.1 (July 18, 2012)</title>
 
 <para>This release has the following improvements:</para>
@@ -94,6 +146,11 @@
     <citerefentry><refentrytitle>nix.conf</refentrytitle><manvolnum>5</manvolnum></citerefentry>.</para>
   </listitem>
 
+  <listitem>
+    <para>When using the Nix daemon, the <option>-s</option> flag in
+    <command>nix-env -qa</command> is now much faster.</para>
+  </listitem>
+    
 </itemizedlist>
 
 </section>

@@ -53,6 +53,12 @@ static void prim_import(EvalState & state, Value * * args, Value & v)
                 % path % ctx);
         if (isDerivation(ctx))
             try {
+                /* For performance, prefetch all substitute info. */
+                PathSet willBuild, willSubstitute, unknown;
+                unsigned long long downloadSize, narSize;
+                queryMissing(*store, singleton<PathSet>(ctx),
+                    willBuild, willSubstitute, unknown, downloadSize, narSize);
+                  
                 /* !!! If using a substitute, we only need to fetch
                    the selected output of this derivation. */
                 store->buildPaths(singleton<PathSet>(ctx));
@@ -359,7 +365,7 @@ static void prim_derivationStrict(EvalState & state, Value * * args, Value & v)
                     else throw EvalError(format("invalid value `%1%' for `outputHashMode' attribute") % s);
                 }
                 else if (key == "outputs") {
-                    Strings tmp = tokenizeString(s);
+                    Strings tmp = tokenizeString<Strings>(s);
                     outputs.clear();
                     foreach (Strings::iterator, j, tmp) {
                         if (outputs.find(*j) != outputs.end())
@@ -483,7 +489,7 @@ static void prim_derivationStrict(EvalState & state, Value * * args, Value & v)
     }
 
     /* Write the resulting term into the Nix store directory. */
-    Path drvPath = writeDerivation(*store, drv, drvName);
+    Path drvPath = writeDerivation(*store, drv, drvName, state.repair);
 
     printMsg(lvlChatty, format("instantiated `%1%' -> `%2%'")
         % drvName % drvPath);
@@ -619,9 +625,9 @@ static void prim_toFile(EvalState & state, Value * * args, Value & v)
         refs.insert(path);
     }
     
-    Path storePath = readOnlyMode
+    Path storePath = settings.readOnlyMode
         ? computeStorePathForText(name, contents, refs)
-        : store->addTextToStore(name, contents, refs);
+        : store->addTextToStore(name, contents, refs, state.repair);
 
     /* Note: we don't need to add `context' to the context of the
        result, since `storePath' itself has references to the paths
@@ -796,9 +802,9 @@ static void prim_filterSource(EvalState & state, Value * * args, Value & v)
 
     FilterFromExpr filter(state, *args[0]);
 
-    Path dstPath = readOnlyMode
+    Path dstPath = settings.readOnlyMode
         ? computeStorePathForPath(path, true, htSHA256, filter).first
-        : store->addToStore(path, true, htSHA256, filter);
+        : store->addToStore(path, true, htSHA256, filter, state.repair);
 
     mkString(v, dstPath, singleton<PathSet>(dstPath));
 }
@@ -1273,7 +1279,7 @@ void EvalState::createBaseEnv()
     mkInt(v, time(0));
     addConstant("__currentTime", v);
 
-    mkString(v, thisSystem.c_str());
+    mkString(v, settings.thisSystem.c_str());
     addConstant("__currentSystem", v);
 
     // Miscellaneous

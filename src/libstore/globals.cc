@@ -1,4 +1,4 @@
-#include "config.h"
+once#include "config.h"
 
 #include "globals.hh"
 #include "util.hh"
@@ -10,48 +10,67 @@
 namespace nix {
 
 
-string nixStore = "/UNINIT";
-string nixDataDir = "/UNINIT";
-string nixLogDir = "/UNINIT";
-string nixStateDir = "/UNINIT";
-string nixDBPath = "/UNINIT";
-string nixConfDir = "/UNINIT";
-string nixLibexecDir = "/UNINIT";
-string nixBinDir = "/UNINIT";
-
-bool keepFailed = false;
-bool keepGoing = false;
-bool tryFallback = false;
-Verbosity buildVerbosity = lvlError;
-unsigned int maxBuildJobs = 1;
-unsigned int buildCores = 1;
-bool readOnlyMode = false;
-bool xmldebugCorcionFailure = false;
-string thisSystem = "unset";
-time_t maxSilentTime = 0;
-time_t buildTimeout = 0;
-Paths substituters;
-bool useBuildHook = true;
-bool printBuildTrace = false;
+Settings settings;
 
 
-static bool settingsRead = false;
-
-static std::map<string, Strings> settings;
-
-/* Overriden settings. */
-std::map<string, Strings> settingsCmdline;
-
-
-string & at(Strings & ss, unsigned int n)
+Settings::Settings()
 {
-    Strings::iterator i = ss.begin();
-    advance(i, n);
-    return *i;
+    keepFailed = false;
+    keepGoing = false;
+    tryFallback = false;
+    buildVerbosity = lvlError;
+    maxBuildJobs = 1;
+    buildCores = 1;
+    readOnlyMode = false;
+    xmldebugCorcionFailure = false;
+    thisSystem = SYSTEM;
+    maxSilentTime = 0;
+    buildTimeout = 0;
+    useBuildHook = true;
+    printBuildTrace = false;
+    reservedSize = 1024 * 1024;
+    fsyncMetadata = true;
+    useSQLiteWAL = true;
+    syncBeforeRegistering = false;
+    useSubstitutes = true;
+    useChroot = false;
+    dirsInChroot.insert("/dev");
+    dirsInChroot.insert("/dev/pts");
+    impersonateLinux26 = false;
+    keepLog = true;
+    compressLog = true;
+    cacheFailure = false;
+    pollInterval = 5;
+    checkRootReachability = false;
+    gcKeepOutputs = false;
+    gcKeepDerivations = true;
+    autoOptimiseStore = false;
+    envKeepDerivations = false;
 }
 
 
-static void readSettings()
+void Settings::processEnvironment()
+{
+    nixStore = canonPath(getEnv("NIX_STORE_DIR", getEnv("NIX_STORE", NIX_STORE_DIR)));
+    nixDataDir = canonPath(getEnv("NIX_DATA_DIR", NIX_DATA_DIR));
+    nixLogDir = canonPath(getEnv("NIX_LOG_DIR", NIX_LOG_DIR));
+    nixStateDir = canonPath(getEnv("NIX_STATE_DIR", NIX_STATE_DIR));
+    nixDBPath = getEnv("NIX_DB_DIR", nixStateDir + "/db");
+    nixConfDir = canonPath(getEnv("NIX_CONF_DIR", NIX_CONF_DIR));
+    nixLibexecDir = canonPath(getEnv("NIX_LIBEXEC_DIR", NIX_LIBEXEC_DIR));
+    nixBinDir = canonPath(getEnv("NIX_BIN_DIR", NIX_BIN_DIR));
+
+    string subs = getEnv("NIX_SUBSTITUTERS", "default");
+    if (subs == "default") {
+        substituters.push_back(nixLibexecDir + "/nix/substituters/copy-from-other-stores.pl");
+        substituters.push_back(nixLibexecDir + "/nix/substituters/download-using-manifests.pl");
+        substituters.push_back(nixLibexecDir + "/nix/substituters/download-from-binary-cache.pl");
+    } else
+        substituters = tokenizeString<Strings>(subs, ":");
+}
+
+
+void Settings::loadConfFile()
 {
     Path settingsFile = (format("%1%/%2%") % nixConfDir % "nix.conf").str();
     if (!pathExists(settingsFile)) return;
@@ -69,105 +88,113 @@ static void readSettings()
         if (hash != string::npos)
             line = string(line, 0, hash);
 
-        Strings tokens = tokenizeString(line);
+        vector<string> tokens = tokenizeString<vector<string> >(line);
         if (tokens.empty()) continue;
 
-        if (tokens.size() < 2 || at(tokens, 1) != "=")
+        if (tokens.size() < 2 || tokens[1] != "=")
             throw Error(format("illegal configuration line `%1%' in `%2%'") % line % settingsFile);
 
-        string name = at(tokens, 0);
+        string name = tokens[0];
 
-        Strings::iterator i = tokens.begin();
+        vector<string>::iterator i = tokens.begin();
         advance(i, 2);
-        settings[name] = Strings(i, tokens.end());
+        settings[name] = concatStringsSep(" ", Strings(i, tokens.end())); // FIXME: slow
     };
-
-    settings.insert(settingsCmdline.begin(), settingsCmdline.end());
-    
-    settingsRead = true;
 }
 
 
-Strings querySetting(const string & name, const Strings & def)
+void Settings::set(const string & name, const string & value)
 {
-    if (!settingsRead) readSettings();
-    std::map<string, Strings>::iterator i = settings.find(name);
-    return i == settings.end() ? def : i->second;
+    settings[name] = value;
+    overrides[name] = value;
 }
 
 
-string querySetting(const string & name, const string & def)
+void Settings::update()
 {
-    Strings defs;
-    defs.push_back(def);
-
-    Strings value = querySetting(name, defs);
-    if (value.size() != 1)
-        throw Error(format("configuration option `%1%' should not be a list") % name);
-
-    return value.front();
+    get(tryFallback, "build-fallback");
+    get(maxBuildJobs, "build-max-jobs");
+    get(buildCores, "build-cores");
+    get(thisSystem, "system");
+    get(maxSilentTime, "build-max-silent-time");
+    get(buildTimeout, "build-timeout");
+    get(reservedSize, "gc-reserved-space");
+    get(fsyncMetadata, "fsync-metadata");
+    get(useSQLiteWAL, "use-sqlite-wal");
+    get(syncBeforeRegistering, "sync-before-registering");
+    get(useSubstitutes, "build-use-substitutes");
+    get(buildUsersGroup, "build-users-group");
+    get(useChroot, "build-use-chroot");
+    get(dirsInChroot, "build-chroot-dirs");
+    get(impersonateLinux26, "build-impersonate-linux-26");
+    get(keepLog, "build-keep-log");
+    get(compressLog, "build-compress-log");
+    get(cacheFailure, "build-cache-failure");
+    get(pollInterval, "build-poll-interval");
+    get(checkRootReachability, "gc-check-reachability");
+    get(gcKeepOutputs, "gc-keep-outputs");
+    get(gcKeepDerivations, "gc-keep-derivations");
+    get(autoOptimiseStore, "auto-optimise-store");
+    get(envKeepDerivations, "env-keep-derivations");
 }
 
 
-bool queryBoolSetting(const string & name, bool def)
+void Settings::get(string & res, const string & name)
 {
-    string v = querySetting(name, def ? "true" : "false");
-    if (v == "true") return true;
-    else if (v == "false") return false;
+    SettingsMap::iterator i = settings.find(name);
+    if (i == settings.end()) return;
+    res = i->second;
+}
+
+
+void Settings::get(bool & res, const string & name)
+{
+    SettingsMap::iterator i = settings.find(name);
+    if (i == settings.end()) return;
+    if (i->second == "true") res = true;
+    else if (i->second == "false") res = false;
     else throw Error(format("configuration option `%1%' should be either `true' or `false', not `%2%'")
-        % name % v);
+        % name % i->second);
 }
 
 
-unsigned int queryIntSetting(const string & name, unsigned int def)
+void Settings::get(PathSet & res, const string & name)
 {
-    int n;
-    if (!string2Int(querySetting(name, int2String(def)), n) || n < 0)
+    SettingsMap::iterator i = settings.find(name);
+    if (i == settings.end()) return;
+    res.clear();
+    Strings ss = tokenizeString<Strings>(i->second);
+    res.insert(ss.begin(), ss.end());
+}
+
+
+template<class N> void Settings::get(N & res, const string & name)
+{
+    SettingsMap::iterator i = settings.find(name);
+    if (i == settings.end()) return;
+    if (!string2Int(i->second, res))
         throw Error(format("configuration setting `%1%' should have an integer value") % name);
-    return n;
 }
 
 
-void overrideSetting(const string & name, const Strings & value)
+string Settings::pack()
 {
-    if (settingsRead) settings[name] = value;
-    settingsCmdline[name] = value;
+    string s;
+    foreach (SettingsMap::iterator, i, settings) {
+        if (i->first.find('\n') != string::npos ||
+            i->first.find('=') != string::npos ||
+            i->second.find('\n') != string::npos)
+            throw Error("illegal option name/value");
+        s += i->first; s += '='; s += i->second; s += '\n';
+    }
+    return s;
 }
 
 
-void reloadSettings()
+Settings::SettingsMap Settings::getOverrides()
 {
-    settingsRead = false;
-    settings.clear();
+    return overrides;
 }
 
 
-void setDefaultsFromEnvironment()
-{
-    /* Setup Nix paths. */
-    nixStore = canonPath(getEnv("NIX_STORE_DIR", getEnv("NIX_STORE", NIX_STORE_DIR)));
-    nixDataDir = canonPath(getEnv("NIX_DATA_DIR", NIX_DATA_DIR));
-    nixLogDir = canonPath(getEnv("NIX_LOG_DIR", NIX_LOG_DIR));
-    nixStateDir = canonPath(getEnv("NIX_STATE_DIR", NIX_STATE_DIR));
-    nixDBPath = getEnv("NIX_DB_DIR", nixStateDir + "/db");
-    nixConfDir = canonPath(getEnv("NIX_CONF_DIR", NIX_CONF_DIR));
-    nixLibexecDir = canonPath(getEnv("NIX_LIBEXEC_DIR", NIX_LIBEXEC_DIR));
-    nixBinDir = canonPath(getEnv("NIX_BIN_DIR", NIX_BIN_DIR));
-
-    string subs = getEnv("NIX_SUBSTITUTERS", "default");
-    if (subs == "default") {
-        substituters.push_back(nixLibexecDir + "/nix/substituters/copy-from-other-stores.pl");
-        substituters.push_back(nixLibexecDir + "/nix/substituters/download-using-manifests.pl");
-    } else
-        substituters = tokenizeString(subs, ":");
-
-    /* Get some settings from the configuration file. */
-    thisSystem = querySetting("system", SYSTEM);
-    maxBuildJobs = queryIntSetting("build-max-jobs", 1);
-    buildCores = queryIntSetting("build-cores", 1);
-    maxSilentTime = queryIntSetting("build-max-silent-time", 0);
-    buildTimeout = queryIntSetting("build-timeout", 0);
-}
-
- 
 }

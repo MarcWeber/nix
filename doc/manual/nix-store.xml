@@ -174,10 +174,19 @@ the specified store paths.  Realisation is a somewhat overloaded term:
 output.  (For non-derivations argument, the argument itself is
 printed.)</para>
 
-<para>If the <option>--dry-run</option> option is used, then
-<command>nix-store</command> will print on standard error a
-description of what packages would be built or downloaded, and then
-quit.</para>
+<para>The following flags are available:</para>
+
+<variablelist>
+
+  <varlistentry><term><option>--dry-run</option></term>
+
+    <listitem><para>Print on standard error a description of what
+    packages would be built or downloaded, without actually performing
+    the operation</para></listitem>
+
+  </varlistentry>
+
+</variablelist>
 
 </refsection>
             
@@ -773,6 +782,7 @@ $ nix-store --add ./foo.c
     <command>nix-store</command>
     <arg choice='plain'><option>--verify</option></arg>
     <arg><option>--check-contents</option></arg>
+    <arg><option>--repair</option></arg>
   </cmdsynopsis>
 </refsection>
 
@@ -785,7 +795,7 @@ automatically repaired.  Inconsistencies are generally the result of
 the Nix store or database being modified by non-Nix tools, or of bugs
 in Nix itself.</para>
 
-<para>There is one option:
+<para>This operation has the following options:
 
 <variablelist>
 
@@ -797,6 +807,16 @@ in Nix itself.</para>
     time.  Paths that have been modified are printed out.  For large
     stores, <option>--check-contents</option> is obviously quite
     slow.</para></listitem>
+    
+  </varlistentry>
+  
+  <varlistentry><term><option>--repair</option></term>
+  
+    <listitem><para>If any valid path is missing from the store, or
+    (if <option>--check-contents</option> is given) the contents of a
+    valid path has been modified, then try to repair the path by
+    redownloading it.  See <command>nix-store --repair-path</command>
+    for details.</para></listitem>
     
   </varlistentry>
   
@@ -842,6 +862,52 @@ $ nix-store --verify-path $(nix-store -qR $(which svn))
 </screen>
 
 </para>
+
+</refsection>
+            
+</refsection>
+
+
+<!--######################################################################-->
+
+<refsection><title>Operation <option>--repair-path</option></title>
+
+<refsection>
+  <title>Synopsis</title>
+  <cmdsynopsis>
+    <command>nix-store</command>
+    <arg choice='plain'><option>--repair-path</option></arg>
+    <arg choice='plain' rep='repeat'><replaceable>paths</replaceable></arg>
+  </cmdsynopsis>
+</refsection>
+
+<refsection><title>Description</title>
+            
+<para>The operation <option>--repair-path</option> attempts to
+“repair” the specified paths by redownloading them using the available
+substituters.  If no substitutes are available, then repair is not
+possible.</para>
+
+<warning><para>During repair, there is a very small time window during
+which the old path (if it exists) is moved out of the way and replaced
+with the new path.  If repair is interrupted in between, then the
+system may be left in a broken state (e.g., if the path contains a
+critical system component like the GNU C Library).</para></warning>
+
+</refsection>
+            
+<refsection><title>Example</title>
+
+<screen>
+$ nix-store --verify-path /nix/store/dj7a81wsm1ijwwpkks3725661h3263p5-glibc-2.13
+path `/nix/store/dj7a81wsm1ijwwpkks3725661h3263p5-glibc-2.13' was modified!
+  expected hash `2db57715ae90b7e31ff1f2ecb8c12ec1cc43da920efcbe3b22763f36a1861588',
+  got `481c5aa5483ebc97c20457bb8bca24deea56550d3985cda0027f67fe54b808e4'
+
+$ nix-store --repair-path /nix/store/dj7a81wsm1ijwwpkks3725661h3263p5-glibc-2.13
+fetching path `/nix/store/d7a81wsm1ijwwpkks3725661h3263p5-glibc-2.13'...
+…
+</screen>
 
 </refsection>
             
@@ -1246,8 +1312,8 @@ paths.</para>
 <refsection><title>Example</title>
 
 <screen>
-$ nix-store --clear-failed-path /nix/store/000zi5dcla86l92jn1g997jb06sidm7x-perl-PerlMagick-6.59
-$ nix-store --clear-failed-path *
+$ nix-store --clear-failed-paths /nix/store/000zi5dcla86l92jn1g997jb06sidm7x-perl-PerlMagick-6.59
+$ nix-store --clear-failed-paths *
 </screen>
 
 </refsection>

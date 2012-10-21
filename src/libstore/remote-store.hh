@@ -26,7 +26,9 @@ public:
     
     bool isValidPath(const Path & path);
 
-    PathSet queryValidPaths();
+    PathSet queryValidPaths(const PathSet & paths);
+    
+    PathSet queryAllValidPaths();
     
     ValidPathInfo queryPathInfo(const Path & path);
 
@@ -44,24 +46,24 @@ public:
 
     Path queryPathFromHashPart(const string & hashPart);
     
-    bool hasSubstitutes(const Path & path);
+    PathSet querySubstitutablePaths(const PathSet & paths);
     
-    bool querySubstitutablePathInfo(const Path & path,
-        SubstitutablePathInfo & info);
+    void querySubstitutablePathInfos(const PathSet & paths,
+        SubstitutablePathInfos & infos);
     
     Path addToStore(const Path & srcPath,
         bool recursive = true, HashType hashAlgo = htSHA256,
-        PathFilter & filter = defaultPathFilter);
+        PathFilter & filter = defaultPathFilter, bool repair = false);
 
     Path addTextToStore(const string & name, const string & s,
-        const PathSet & references);
+        const PathSet & references, bool repair = false);
 
     void exportPath(const Path & path, bool sign,
         Sink & sink);
 
     Paths importPaths(bool requireSignature, Source & source);
     
-    void buildPaths(const PathSet & paths);
+    void buildPaths(const PathSet & paths, bool repair = false);
 
     void ensurePath(const Path & path);
 

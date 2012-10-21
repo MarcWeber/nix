@@ -1,4 +1,4 @@
-PERL_MODULES = lib/Nix/Store.pm lib/Nix/Manifest.pm lib/Nix/GeneratePatches.pm lib/Nix/SSH.pm lib/Nix/CopyClosure.pm lib/Nix/Config.pm.in
+PERL_MODULES = lib/Nix/Store.pm lib/Nix/Manifest.pm lib/Nix/GeneratePatches.pm lib/Nix/SSH.pm lib/Nix/CopyClosure.pm lib/Nix/Config.pm.in lib/Nix/Utils.pm
 
 all: $(PERL_MODULES:.in=)
 
@@ -26,6 +26,7 @@ AM_CXXFLAGS = \
   -D_FILE_OFFSET_BITS=64
 
 lib/Nix/Store.cc: lib/Nix/Store.xs
+	$(INSTALL) -d lib/Nix
 	xsubpp $^ -output $@
 
 else

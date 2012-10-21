@@ -25,7 +25,7 @@ DrvInfos queryInstalled(EvalState & state, const Path & userEnv)
         Value v;
         state.evalFile(manifestFile, v);
         Bindings bindings;
-        getDerivations(state, v, "", bindings, elems);
+        getDerivations(state, v, "", bindings, elems, false);
     } else if (pathExists(oldManifestFile))
         readLegacyManifest(oldManifestFile, elems);
 
@@ -45,7 +45,7 @@ bool createUserEnv(EvalState & state, DrvInfos & elems,
             drvsToBuild.insert(i->queryDrvPath(state));
 
     debug(format("building user environment dependencies"));
-    store->buildPaths(drvsToBuild);
+    store->buildPaths(drvsToBuild, state.repair);
 
     /* Construct the whole top level derivation. */
     PathSet references;
@@ -127,12 +127,12 @@ bool createUserEnv(EvalState & state, DrvInfos & elems,
     /* Evaluate it. */
     debug("evaluating user environment builder");
     DrvInfo topLevelDrv;
-    if (!getDerivation(state, topLevel, topLevelDrv))
+    if (!getDerivation(state, topLevel, topLevelDrv, false))
         abort();
     
     /* Realise the resulting store expression. */
     debug("building user environment");
-    store->buildPaths(singleton<PathSet>(topLevelDrv.queryDrvPath(state)));
+    store->buildPaths(singleton<PathSet>(topLevelDrv.queryDrvPath(state)), state.repair);
 
     /* Switch the current user environment to the output path. */
     PathLocks lock;

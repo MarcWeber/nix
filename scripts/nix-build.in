@@ -33,29 +33,12 @@ for (my $n = 0; $n < scalar @ARGV; $n++) {
     my $arg = $ARGV[$n];
 
     if ($arg eq "--help") {
-        print STDERR <<EOF;
-Usage: nix-build [OPTION]... [FILE]...
+        exec "man nix-build" or die;
+    }
 
-`nix-build' builds the given Nix expressions (which
-default to ./default.nix if none are given).  A symlink called
-`result' is placed in the current directory.
-
-Flags:
-  --add-drv-link: create a symlink `derivation' to the store derivation
-  --drv-link NAME: create symlink NAME instead of `derivation'
-  --no-out-link: do not create the `result' symlink
-  --out-link / -o NAME: create symlink NAME instead of `result'
-  --attr / -A ATTR: select a specific attribute from the Nix expression
-
-  --run-env: build dependencies of the specified derivation, then start a
-      shell with the environment of the derivation
-  --command: command to run with `--run-env'
-  --exclude: regexp specifying dependencies to be excluded by `--run-env'
-
-Any additional flags are passed to `nix-store'.
-EOF
+    elsif ($arg eq "--version") {
+        print "nix-build (Nix) $Nix::Config::version\n";
         exit 0;
-        # '` hack
     }
 
     elsif ($arg eq "--add-drv-link") {
@@ -129,7 +112,7 @@ EOF
         $verbose = 1;
     }
 
-    elsif ($arg eq "--quiet") {
+    elsif ($arg eq "--quiet" || $arg eq "--repair") {
         push @buildArgs, $arg;
         push @instArgs, $arg;
     }

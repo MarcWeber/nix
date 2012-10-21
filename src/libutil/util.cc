@@ -253,7 +253,7 @@ string readLine(int fd)
             if (errno != EINTR)
                 throw SysError("reading a line");
         } else if (rd == 0)
-            throw Error("unexpected EOF reading a line");
+            throw EndOfFile("unexpected EOF reading a line");
         else {
             if (ch == '\n') return s;
             s += ch;
@@ -984,9 +984,9 @@ void _interrupted()
 //////////////////////////////////////////////////////////////////////
 
 
-Strings tokenizeString(const string & s, const string & separators)
+template<class C> C tokenizeString(const string & s, const string & separators)
 {
-    Strings result;
+    C result;
     string::size_type pos = s.find_first_not_of(separators, 0);
     while (pos != string::npos) {
         string::size_type end = s.find_first_of(separators, pos + 1);
@@ -998,6 +998,9 @@ Strings tokenizeString(const string & s, const string & separators)
     return result;
 }
 
+template Strings tokenizeString(const string & s, const string & separators);
+template vector<string> tokenizeString(const string & s, const string & separators);
+
 
 string concatStringsSep(const string & sep, const Strings & ss)
 {
@@ -1007,6 +1010,13 @@ string concatStringsSep(const string & sep, const Strings & ss)
         s += *i;
     }
     return s;
+}
+
+
+string chomp(const string & s)
+{
+    size_t i = s.find_last_not_of(" \n\r\t");
+    return i == string::npos ? "" : string(s, 0, i + 1);
 }
 
 
@@ -1088,6 +1098,21 @@ bool endOfList(std::istream & str)
         return true;
     }
     return false;
+}
+
+
+string decodeOctalEscaped(const string & s)
+{
+    string r;
+    for (string::const_iterator i = s.begin(); i != s.end(); ) {
+        if (*i != '\\') { r += *i++; continue; }
+        unsigned char c = 0;
+        ++i;
+        while (i != s.end() && *i >= '0' && *i < '8')
+            c = c * 8 + (*i++ - '0');
+        r += c;
+    }
+    return r;
 }
 
 

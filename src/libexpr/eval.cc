@@ -207,7 +207,7 @@ void EvalState::addConstant(const string & name, Value & v)
 
 
 string EvalState::showTypeOrXml(Value &v){
-    if (xmldebugCorcionFailure){
+    if (xmldebugCoercionFailure){
         // make running this code intsead optional
         std::ostringstream out;
         PathSet context;

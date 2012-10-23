@@ -5,7 +5,6 @@
 #include "store-api.hh"
 #include "util.hh"
 #include "misc.hh"
-#include "value-to-xml.hh"
 
 #include <iostream>
 #include <cctype>

@@ -42,7 +42,7 @@ inline void EvalState::forceAttrs(Value & v)
 {
     forceValue(v);
     if (v.type != tAttrs)
-        throwTypeError("value is %1% while an attribute set was expected", showType(v));
+        throwTypeError("value is %1% while an attribute set was expected", showTypeOrXml(v));
 }
 
 
@@ -50,7 +50,7 @@ inline void EvalState::forceList(Value & v)
 {
     forceValue(v);
     if (v.type != tList)
-        throwTypeError("value is %1% while a list was expected", showType(v));
+        throwTypeError("value is %1% while a list was expected", showTypeOrXml(v));
 }
 
 }

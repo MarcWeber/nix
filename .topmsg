@@ -5,9 +5,13 @@ We're all pretty helpless seeing messages like:
 
   value is an attribute set while a list was expected
 
-This patch add sthe flag --xml-debug-coercion-failure
-making nix output the xml representation of the attribute set
-- which of course may fail eg if infinite recursions are used.
-However its more often useful than failing.
+This patch add the flag --xml-debug-coercion-failure
+making nix output the xml representation of the attribute set.
+
+Please not that this may fail if the thing to be coerced
+cannot be turned into xml, eg because its evaluation does not end, eg due to
+infinite recursion.
+
+TODO: document this flag
 
 Signed-off-by: Marc Weber <marco-oweber@gmx.de>

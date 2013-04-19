@@ -10,6 +10,14 @@
 namespace nix {
 
 
+/* The default location of the daemon socket, relative to nixStateDir.
+   The socket is in a directory to allow you to control access to the
+   Nix daemon by setting the mode/ownership of the directory
+   appropriately.  (This wouldn't work on the socket itself since it
+   must be deleted and recreated on startup.) */
+#define DEFAULT_SOCKET_PATH "/daemon-socket/socket"
+
+
 Settings settings;
 
 
@@ -59,10 +67,12 @@ void Settings::processEnvironment()
     nixConfDir = canonPath(getEnv("NIX_CONF_DIR", NIX_CONF_DIR));
     nixLibexecDir = canonPath(getEnv("NIX_LIBEXEC_DIR", NIX_LIBEXEC_DIR));
     nixBinDir = canonPath(getEnv("NIX_BIN_DIR", NIX_BIN_DIR));
+    nixDaemonSocketFile = canonPath(nixStateDir + DEFAULT_SOCKET_PATH);
 
     string subs = getEnv("NIX_SUBSTITUTERS", "default");
     if (subs == "default") {
-        substituters.push_back(nixLibexecDir + "/nix/substituters/copy-from-other-stores.pl");
+        if (getEnv("NIX_OTHER_STORES") != "")
+            substituters.push_back(nixLibexecDir + "/nix/substituters/copy-from-other-stores.pl");
         substituters.push_back(nixLibexecDir + "/nix/substituters/download-using-manifests.pl");
         substituters.push_back(nixLibexecDir + "/nix/substituters/download-from-binary-cache.pl");
     } else
@@ -158,7 +168,7 @@ void Settings::get(bool & res, const string & name)
 }
 
 
-void Settings::get(PathSet & res, const string & name)
+void Settings::get(StringSet & res, const string & name)
 {
     SettingsMap::iterator i = settings.find(name);
     if (i == settings.end()) return;
@@ -195,6 +205,9 @@ Settings::SettingsMap Settings::getOverrides()
 {
     return overrides;
 }
+
+
+const string nixVersion = NIX_VERSION;
 
 
 }

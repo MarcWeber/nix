@@ -139,6 +139,9 @@ EvalState::EvalState()
     , sName(symbols.create("name"))
     , sSystem(symbols.create("system"))
     , sOverrides(symbols.create("__overrides"))
+    , sOutputs(symbols.create("outputs"))
+    , sOutputName(symbols.create("outputName"))
+    , sIgnoreNulls(symbols.create("__ignoreNulls"))
     , baseEnv(allocEnv(128))
     , baseEnvDispl(0)
     , staticBaseEnv(false, 0)
@@ -803,20 +806,20 @@ void EvalState::autoCallFunction(Bindings & args, Value & fun, Value & res)
         return;
     }
 
-    Value actualArgs;
-    mkAttrs(actualArgs, fun.lambda.fun->formals->formals.size());
+    Value * actualArgs = allocValue();
+    mkAttrs(*actualArgs, fun.lambda.fun->formals->formals.size());
 
     foreach (Formals::Formals_::iterator, i, fun.lambda.fun->formals->formals) {
         Bindings::iterator j = args.find(i->name);
         if (j != args.end())
-            actualArgs.attrs->push_back(*j);
+            actualArgs->attrs->push_back(*j);
         else if (!i->def)
             throwTypeError("cannot auto-call a function that has an argument without a default value (`%1%')", i->name);
     }
 
-    actualArgs.attrs->sort();
+    actualArgs->attrs->sort();
 
-    callFunction(fun, actualArgs, res);
+    callFunction(fun, *actualArgs, res);
 }
 
 
@@ -976,7 +979,7 @@ void ExprConcatStrings::eval(EvalState & state, Env & env, Value & v)
            since paths are copied when they are used in a derivation),
            and none of the strings are allowed to have contexts. */
         if (first) {
-            isPath = vStr.type == tPath;
+            isPath = !forceString && vStr.type == tPath;
             first = false;
         }
 

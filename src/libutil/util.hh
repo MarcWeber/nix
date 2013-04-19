@@ -148,7 +148,9 @@ void printMsg_(Verbosity level, const format & f);
 
 void warnOnce(bool & haveWarned, const format & f);
 
-extern void (*writeToStderr) (const unsigned char * buf, size_t count);
+void writeToStderr(const string & s);
+
+extern void (*_writeToStderr) (const unsigned char * buf, size_t count);
 
 
 /* Wrappers arount read()/write() that read/write exactly the
@@ -172,7 +174,7 @@ struct AutoDeleteArray
 {
     T * p;
     AutoDeleteArray(T * p) : p(p) { }
-    ~AutoDeleteArray() 
+    ~AutoDeleteArray()
     {
         delete [] p;
     }
@@ -183,7 +185,7 @@ class AutoDelete
 {
     Path path;
     bool del;
-    bool recursive;    
+    bool recursive;
 public:
     AutoDelete(const Path & p, bool recursive = true);
     ~AutoDelete();
@@ -262,13 +264,12 @@ void closeMostFDs(const set<int> & exceptions);
 /* Set the close-on-exec flag for the given file descriptor. */
 void closeOnExec(int fd);
 
-/* Wrapper around _exit() on Unix and ExitProcess() on Windows.  (On
-   Cygwin, _exit() doesn't seem to do the right thing.) */
-void quickExit(int status);
-
 /* Common initialisation for setuid programs: clear the environment,
    sanitize file handles 0, 1 and 2. */
 void setuidCleanup();
+
+/* Call vfork() if available, otherwise fork(). */
+extern pid_t (*maybeVfork)();
 
 
 /* User interruption. */
@@ -292,6 +293,7 @@ template<class C> C tokenizeString(const string & s, const string & separators =
 /* Concatenate the given strings with a separator between the
    elements. */
 string concatStringsSep(const string & sep, const Strings & ss);
+string concatStringsSep(const string & sep, const StringSet & ss);
 
 
 /* Remove trailing whitespace from a string. */

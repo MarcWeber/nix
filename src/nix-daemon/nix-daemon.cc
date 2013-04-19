@@ -6,7 +6,6 @@
 #include "archive.hh"
 #include "globals.hh"
 
-#include <iostream>
 #include <cstring>
 #include <unistd.h>
 #include <signal.h>
@@ -335,6 +334,7 @@ static void performOp(unsigned int clientVersion,
 
     case wopQueryReferences:
     case wopQueryReferrers:
+    case wopQueryValidDerivers:
     case wopQueryDerivationOutputs: {
         Path path = readStorePath(from);
         startWork();
@@ -343,6 +343,8 @@ static void performOp(unsigned int clientVersion,
             store->queryReferences(path, paths);
         else if (op == wopQueryReferrers)
             store->queryReferrers(path, paths);
+        else if (op == wopQueryValidDerivers)
+            paths = store->queryValidDerivers(path);
         else paths = store->queryDerivationOutputs(path);
         stopWork();
         writeStrings(paths, to);
@@ -642,7 +644,7 @@ static void processConnection()
 {
     canSendStderr = false;
     myPid = getpid();
-    writeToStderr = tunnelStderr;
+    _writeToStderr = tunnelStderr;
 
 #ifdef HAVE_HUP_NOTIFICATION
     /* Allow us to receive SIGPOLL for events on the client socket. */
@@ -772,7 +774,7 @@ static void daemonLoop()
         if (fdSocket == -1)
             throw SysError("cannot create Unix domain socket");
 
-        string socketPath = settings.nixStateDir + DEFAULT_SOCKET_PATH;
+        string socketPath = settings.nixDaemonSocketFile;
 
         createDirs(dirOf(socketPath));
 
@@ -877,7 +879,7 @@ static void daemonLoop()
                     processConnection();
 
                 } catch (std::exception & e) {
-                    std::cerr << format("child error: %1%\n") % e.what();
+                    writeToStderr("child error: " + string(e.what()) + "\n");
                 }
                 exit(0);
             }

@@ -43,12 +43,12 @@ sub createLinks {
             $srcFile =~ /\/log$/)
         {
             # Do nothing.
-	}
+        }
 
         elsif (-d $srcFile) {
 
             lstat $dstFile;
-            
+
             if (-d _) {
                 createLinks($srcFile, $dstFile, $priority);
             }
@@ -59,7 +59,7 @@ sub createLinks {
                     die "collission between directory `$srcFile' and non-directory `$target'";
                 }
                 unlink $dstFile or die "error unlinking `$dstFile': $!";
-                mkdir $dstFile, 0755 || 
+                mkdir $dstFile, 0755 ||
                     die "error creating directory `$dstFile': $!";
                 createLinks($target, $dstFile, $priorities{$dstFile});
                 createLinks($srcFile, $dstFile, $priority);
@@ -78,15 +78,15 @@ sub createLinks {
             if (-l $dstFile) {
                 my $target = readlink $dstFile;
                 my $prevPriority = $priorities{$dstFile};
-                die ( "Collission between `$srcFile' and `$target'. "
-                    . "Suggested solution: use `nix-env --set-flag "
+                die ( "collission between `$srcFile' and `$target'; "
+                    . "use `nix-env --set-flag "
                     . "priority NUMBER PKGNAME' to change the priority of "
-                    . "one of the conflicting packages.\n" )
+                    . "one of the conflicting packages\n" )
                     if $prevPriority == $priority;
                 next if $prevPriority < $priority;
                 unlink $dstFile or die;
             }
-            
+
             symlink($srcFile, $dstFile) ||
                 die "error creating link `$dstFile': $!";
             $priorities{$dstFile} = $priority;
@@ -125,27 +125,29 @@ sub addPkg {
 
 # Convert the stuff we get from the environment back into a coherent
 # data type.
-my @paths = split ' ', $ENV{"paths"};
-my @active = split ' ', $ENV{"active"};
-my @priority = split ' ', $ENV{"priority"};
-
-die if scalar @paths != scalar @active;
-die if scalar @paths != scalar @priority;
-
-my %pkgs;
-
-for (my $n = 0; $n < scalar @paths; $n++) {
-    $pkgs{$paths[$n]} =
-        { active => $active[$n]
-        , priority => $priority[$n] };
+my @pkgs;
+my @derivations = split ' ', $ENV{"derivations"};
+while (scalar @derivations) {
+    my $active = shift @derivations;
+    my $priority = shift @derivations;
+    my $outputs = shift @derivations;
+    for (my $n = 0; $n < $outputs; $n++) {
+        my $path = shift @derivations;
+        push @pkgs,
+            { path => $path
+            , active => $active ne "false"
+            , priority => int($priority) };
+    }
 }
 
 
 # Symlink to the packages that have been installed explicitly by the
-# user.
-foreach my $pkg (sort (keys %pkgs)) {
+# user.  Process in priority order to reduce unnecessary
+# symlink/unlink steps.
+@pkgs = sort { $a->{priority} <=> $b->{priority} || $a->{path} cmp $b->{path} } @pkgs;
+foreach my $pkg (@pkgs) {
     #print $pkg, " ", $pkgs{$pkg}->{priority}, "\n";
-    addPkg($pkg, $pkgs{$pkg}->{priority}) if $pkgs{$pkg}->{active} ne "false";
+    addPkg($pkg->{path}, $pkg->{priority}) if $pkg->{active};
 }
 
 

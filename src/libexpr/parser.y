@@ -4,10 +4,10 @@
 %error-verbose
 %defines
 /* %no-lines */
-%parse-param { yyscan_t scanner }
-%parse-param { ParseData * data }
-%lex-param { yyscan_t scanner }
-%lex-param { ParseData * data }
+%parse-param { void * scanner }
+%parse-param { nix::ParseData * data }
+%lex-param { void * scanner }
+%lex-param { nix::ParseData * data }
 %expect 1
 %expect-rr 1
 
@@ -52,7 +52,6 @@ namespace nix {
 
 #include "parser-tab.hh"
 #include "lexer-tab.hh"
-#define YYSTYPE YYSTYPE // workaround a bug in Bison 2.4
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -203,7 +202,7 @@ static Expr * stripIndentation(SymbolTable & symbols, vector<Expr *> & es)
         es2->push_back(new ExprString(symbols.create(s2)));
     }
 
-    return es2->size() == 1 ? (*es2)[0] : new ExprConcatStrings(es2);
+    return es2->size() == 1 ? (*es2)[0] : new ExprConcatStrings(true, es2);
 }
 
 
@@ -318,7 +317,7 @@ expr_op
     { vector<Expr *> * l = new vector<Expr *>;
       l->push_back($1);
       l->push_back($3);
-      $$ = new ExprConcatStrings(l);
+      $$ = new ExprConcatStrings(false, l);
     }
   | expr_op CONCAT expr_op { $$ = new ExprOpConcatLists($1, $3); }
   | expr_app
@@ -349,7 +348,7 @@ expr_simple
       /* For efficiency, and to simplify parse trees a bit. */
       if ($2->empty()) $$ = new ExprString(data->symbols.create(""));
       else if ($2->size() == 1) $$ = $2->front();
-      else $$ = new ExprConcatStrings($2);
+      else $$ = new ExprConcatStrings(true, $2);
   }
   | IND_STRING_OPEN ind_string_parts IND_STRING_CLOSE {
       $$ = stripIndentation(data->symbols, *$2);

@@ -106,6 +106,7 @@ AC_LANG_POP(C++)
 # Check for chroot support (requires chroot() and bind mounts).
 AC_CHECK_FUNCS([chroot])
 AC_CHECK_FUNCS([unshare])
+AC_CHECK_FUNCS([statvfs])
 AC_CHECK_HEADERS([sched.h])
 AC_CHECK_HEADERS([sys/param.h])
 AC_CHECK_HEADERS([sys/mount.h], [], [],
@@ -113,6 +114,10 @@ AC_CHECK_HEADERS([sys/mount.h], [], [],
 # include <sys/param.h>
 # endif
 ])
+
+
+# Check for vfork.
+#AC_FUNC_FORK()
 
 
 # Check for lutimes, optionally used for changing the mtime of
@@ -348,7 +353,6 @@ else
     AC_MSG_RESULT(no)
 fi
 AC_SUBST(tarFlags)
-
 
 
 AM_CONFIG_HEADER([config.h])

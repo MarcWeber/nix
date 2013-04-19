@@ -7,10 +7,8 @@
 #include "local-store.hh"
 #include "util.hh"
 #include "archive.hh"
-#include "immutable.hh"
 
 #include <map>
-#include <iostream>
 #include <sstream>
 #include <algorithm>
 #include <boost/shared_ptr.hpp>
@@ -43,6 +41,12 @@
 #endif
 #if HAVE_SCHED_H
 #include <sched.h>
+#endif
+
+/* In GNU libc 2.11, <sys/mount.h> does not define `MS_PRIVATE', but
+   <linux/fs.h> does.  */
+#if !defined MS_PRIVATE && defined HAVE_LINUX_FS_H
+#include <linux/fs.h>
 #endif
 
 #define CHROOT_ENABLED HAVE_CHROOT && HAVE_UNSHARE && HAVE_SYS_MOUNT_H && defined(MS_BIND) && defined(MS_PRIVATE) && defined(CLONE_NEWNS)
@@ -94,7 +98,7 @@ typedef map<Path, WeakGoalPtr> WeakGoalMap;
 class Goal : public boost::enable_shared_from_this<Goal>
 {
 public:
-    typedef enum {ecBusy, ecSuccess, ecFailed, ecNoSubstituters} ExitCode;
+    typedef enum {ecBusy, ecSuccess, ecFailed, ecNoSubstituters, ecIncompleteClosure} ExitCode;
 
 protected:
 
@@ -115,6 +119,10 @@ protected:
        failed because there are no substituters. */
     unsigned int nrNoSubstituters;
 
+    /* Number of substitution goals we are/were waiting for that
+       failed because othey had unsubstitutable references. */
+    unsigned int nrIncompleteClosure;
+
     /* Name of this goal for debugging purposes. */
     string name;
 
@@ -123,7 +131,7 @@ protected:
 
     Goal(Worker & worker) : worker(worker)
     {
-        nrFailed = nrNoSubstituters = 0;
+        nrFailed = nrNoSubstituters = nrIncompleteClosure = 0;
         exitCode = ecBusy;
     }
 
@@ -241,7 +249,7 @@ public:
     ~Worker();
 
     /* Make a goal (with caching). */
-    GoalPtr makeDerivationGoal(const Path & drvPath, bool repair = false);
+    GoalPtr makeDerivationGoal(const Path & drvPath, const StringSet & wantedOutputs, bool repair = false);
     GoalPtr makeSubstitutionGoal(const Path & storePath, bool repair = false);
 
     /* Remove a dead goal. */
@@ -308,9 +316,11 @@ void Goal::waiteeDone(GoalPtr waitee, ExitCode result)
     trace(format("waitee `%1%' done; %2% left") %
         waitee->name % waitees.size());
 
-    if (result == ecFailed || result == ecNoSubstituters) ++nrFailed;
+    if (result == ecFailed || result == ecNoSubstituters || result == ecIncompleteClosure) ++nrFailed;
 
     if (result == ecNoSubstituters) ++nrNoSubstituters;
+
+    if (result == ecIncompleteClosure) ++nrIncompleteClosure;
 
     if (waitees.empty() || (result == ecFailed && !settings.keepGoing)) {
 
@@ -334,7 +344,7 @@ void Goal::amDone(ExitCode result)
 {
     trace("done");
     assert(exitCode == ecBusy);
-    assert(result == ecSuccess || result == ecFailed || result == ecNoSubstituters);
+    assert(result == ecSuccess || result == ecFailed || result == ecNoSubstituters || result == ecIncompleteClosure);
     exitCode = result;
     foreach (WeakGoals::iterator, i, waiters) {
         GoalPtr goal = i->lock();
@@ -356,7 +366,7 @@ void Goal::trace(const format & f)
 
 
 /* Common initialisation performed in child processes. */
-void commonChildInit(Pipe & logPipe)
+static void commonChildInit(Pipe & logPipe)
 {
     /* Put the child in a separate session (and thus a separate
        process group) so that it has no controlling terminal (meaning
@@ -368,8 +378,6 @@ void commonChildInit(Pipe & logPipe)
     /* Dup the write side of the logger pipe into stderr. */
     if (dup2(logPipe.writeSide, STDERR_FILENO) == -1)
         throw SysError("cannot pipe standard error into log file");
-    logPipe.readSide.close();
-    logPipe.writeSide.close();
 
     /* Dup stderr to stdout. */
     if (dup2(STDERR_FILENO, STDOUT_FILENO) == -1)
@@ -567,9 +575,9 @@ static void runSetuidHelper(const string & command,
             throw SysError(format("executing `%1%'") % program);
         }
         catch (std::exception & e) {
-            std::cerr << "error: " << e.what() << std::endl;
+            writeToStderr("error: " + string(e.what()) + "\n");
         }
-        quickExit(1);
+        _exit(1);
     }
 
     /* Parent. */
@@ -667,7 +675,7 @@ HookInstance::HookInstance()
     builderOut.create();
 
     /* Fork the hook. */
-    pid = fork();
+    pid = maybeVfork();
     switch (pid) {
 
     case -1:
@@ -681,12 +689,10 @@ HookInstance::HookInstance()
             if (chdir("/") == -1) throw SysError("changing into `/");
 
             /* Dup the communication pipes. */
-            toHook.writeSide.close();
             if (dup2(toHook.readSide, STDIN_FILENO) == -1)
                 throw SysError("dupping to-hook read side");
 
             /* Use fd 4 for the builder's stdout/stderr. */
-            builderOut.readSide.close();
             if (dup2(builderOut.writeSide, 4) == -1)
                 throw SysError("dupping builder's stdout/stderr");
 
@@ -699,9 +705,9 @@ HookInstance::HookInstance()
             throw SysError(format("executing `%1%'") % buildHook);
 
         } catch (std::exception & e) {
-            std::cerr << format("build hook error: %1%") % e.what() << std::endl;
+            writeToStderr("build hook error: " + string(e.what()) + "\n");
         }
-        quickExit(1);
+        _exit(1);
     }
 
     /* parent */
@@ -715,13 +721,7 @@ HookInstance::HookInstance()
 HookInstance::~HookInstance()
 {
     try {
-        /* Cleanly shut down the hook by closing its stdin if it's not
-           already building.  Otherwise pid's destructor will kill
-           it. */
-        if (pid != -1 && toHook.writeSide != -1) {
-            toHook.writeSide.close();
-            pid.wait(true);
-        }
+        pid.kill();
     } catch (...) {
         ignoreException();
     }
@@ -760,6 +760,17 @@ class DerivationGoal : public Goal
 private:
     /* The path of the derivation. */
     Path drvPath;
+
+    /* The specific outputs that we need to build.  Empty means all of
+       them. */
+    StringSet wantedOutputs;
+
+    /* Whether additional wanted outputs have been added. */
+    bool needRestart;
+
+    /* Whether to retry substituting the outputs after building the
+       inputs. */
+    bool retrySubstitution;
 
     /* The derivation stored at drvPath. */
     Derivation drv;
@@ -817,7 +828,8 @@ private:
     GoalState state;
 
     /* Stuff we need to pass to initChild(). */
-    PathSet dirsInChroot;
+    typedef map<Path, Path> DirsInChroot; // maps target path to source path
+    DirsInChroot dirsInChroot;
     typedef map<string, string> Environment;
     Environment env;
 
@@ -836,7 +848,7 @@ private:
     const static int childSetupFailed = 189;
 
 public:
-    DerivationGoal(const Path & drvPath, Worker & worker, bool repair = false);
+    DerivationGoal(const Path & drvPath, const StringSet & wantedOutputs, Worker & worker, bool repair = false);
     ~DerivationGoal();
 
     void cancel();
@@ -847,6 +859,9 @@ public:
     {
         return drvPath;
     }
+
+    /* Add wanted outputs to an already existing derivation goal. */
+    void addWantedOutputs(const StringSet & outputs);
 
 private:
     /* The states. */
@@ -902,8 +917,11 @@ private:
 };
 
 
-DerivationGoal::DerivationGoal(const Path & drvPath, Worker & worker, bool repair)
+DerivationGoal::DerivationGoal(const Path & drvPath, const StringSet & wantedOutputs, Worker & worker, bool repair)
     : Goal(worker)
+    , wantedOutputs(wantedOutputs)
+    , needRestart(false)
+    , retrySubstitution(false)
     , fLogFile(0)
     , bzLogFile(0)
     , useChroot(false)
@@ -969,6 +987,23 @@ void DerivationGoal::cancel()
 void DerivationGoal::work()
 {
     (this->*state)();
+}
+
+
+void DerivationGoal::addWantedOutputs(const StringSet & outputs)
+{
+    /* If we already want all outputs, there is nothing to do. */
+    if (wantedOutputs.empty()) return;
+
+    if (outputs.empty()) {
+        wantedOutputs.clear();
+        needRestart = true;
+    } else
+        foreach (StringSet::const_iterator, i, outputs)
+            if (wantedOutputs.find(*i) == wantedOutputs.end()) {
+                wantedOutputs.insert(*i);
+                needRestart = true;
+            }
 }
 
 
@@ -1043,10 +1078,21 @@ void DerivationGoal::outputsSubstituted()
 {
     trace("all outputs substituted (maybe)");
 
-    if (nrFailed > 0 && nrFailed > nrNoSubstituters && !settings.tryFallback)
+    if (nrFailed > 0 && nrFailed > nrNoSubstituters + nrIncompleteClosure && !settings.tryFallback)
         throw Error(format("some substitutes for the outputs of derivation `%1%' failed; try `--fallback'") % drvPath);
 
-    nrFailed = nrNoSubstituters = 0;
+    /*  If the substitutes form an incomplete closure, then we should
+        build the dependencies of this derivation, but after that, we
+        can still use the substitutes for this derivation itself. */
+    if (nrIncompleteClosure > 0 && !retrySubstitution) retrySubstitution = true;
+
+    nrFailed = nrNoSubstituters = nrIncompleteClosure = 0;
+
+    if (needRestart) {
+        needRestart = false;
+        haveDerivation();
+        return;
+    }
 
     if (checkPathValidity(false, repair).size() == 0) {
         if (repair) repairClosure(); else amDone(ecSuccess);
@@ -1056,9 +1102,13 @@ void DerivationGoal::outputsSubstituted()
     /* Otherwise, at least one of the output paths could not be
        produced using a substitute.  So we have to build instead. */
 
+    /* Make sure checkPathValidity() from now on checks all
+       outputs. */
+    wantedOutputs = PathSet();
+
     /* The inputs must be built before we can build this goal. */
     foreach (DerivationInputs::iterator, i, drv.inputDrvs)
-        addWaitee(worker.makeDerivationGoal(i->first, repair));
+        addWaitee(worker.makeDerivationGoal(i->first, i->second, repair));
 
     foreach (PathSet::iterator, i, drv.inputSrcs)
         addWaitee(worker.makeSubstitutionGoal(*i));
@@ -1108,7 +1158,7 @@ void DerivationGoal::repairClosure()
         if (drvPath2 == "")
             addWaitee(worker.makeSubstitutionGoal(*i, true));
         else
-            addWaitee(worker.makeDerivationGoal(drvPath2, true));
+            addWaitee(worker.makeDerivationGoal(drvPath2, PathSet(), true));
     }
 
     if (waitees.empty()) {
@@ -1139,6 +1189,11 @@ void DerivationGoal::inputsRealised()
                 "%2% dependencies couldn't be built")
             % drvPath % nrFailed);
         amDone(ecFailed);
+        return;
+    }
+
+    if (retrySubstitution) {
+        haveDerivation();
         return;
     }
 
@@ -1333,10 +1388,8 @@ void replaceValidPath(const Path & storePath, const Path tmpPath)
        way first.  We'd better not be interrupted here, because if
        we're repairing (say) Glibc, we end up with a broken system. */
     Path oldPath = (format("%1%.old-%2%-%3%") % storePath % getpid() % rand()).str();
-    if (pathExists(storePath)) {
-        makeMutable(storePath);
+    if (pathExists(storePath))
         rename(storePath.c_str(), oldPath.c_str());
-    }
     if (rename(tmpPath.c_str(), storePath.c_str()) == -1)
         throw SysError(format("moving `%1%' to `%2%'") % tmpPath % storePath);
     if (pathExists(oldPath))
@@ -1551,7 +1604,7 @@ HookReply DerivationGoal::tryBuildHook()
             break;
         }
         s += "\n";
-        writeToStderr((unsigned char *) s.data(), s.size());
+        writeToStderr(s);
     }
 
     debug(format("hook reply is `%1%'") % reply);
@@ -1644,7 +1697,8 @@ void DerivationGoal::startBuilder()
        if HOME is not set, but they will just assume that the settings file
        they are looking for does not exist if HOME is set but points to some
        non-existing path. */
-    env["HOME"] = "/homeless-shelter";
+    Path homeDir = "/homeless-shelter";
+    env["HOME"] = homeDir;
 
     /* Tell the builder where the Nix store is.  Usually they
        shouldn't care, but this is useful for purity checking (e.g.,
@@ -1835,8 +1889,14 @@ void DerivationGoal::startBuilder()
 
         /* Bind-mount a user-configurable set of directories from the
            host file system. */
-        dirsInChroot = settings.dirsInChroot;
-        dirsInChroot.insert(tmpDir);
+        foreach (StringSet::iterator, i, settings.dirsInChroot) {
+            size_t p = i->find('=');
+            if (p == string::npos)
+                dirsInChroot[*i] = *i;
+            else
+                dirsInChroot[string(*i, 0, p)] = string(*i, p + 1);
+        }
+        dirsInChroot[tmpDir] = tmpDir;
 
         /* Make the closure of the inputs available in the chroot,
            rather than the whole Nix store.  This prevents any access
@@ -1853,12 +1913,8 @@ void DerivationGoal::startBuilder()
             if (lstat(i->c_str(), &st))
                 throw SysError(format("getting attributes of path `%1%'") % *i);
             if (S_ISDIR(st.st_mode))
-                dirsInChroot.insert(*i);
+                dirsInChroot[*i] = *i;
             else {
-                /* Creating a hard link to *i is impossible if its
-                   immutable bit is set.  So clear it first. */
-                makeMutable(*i);
-
                 Path p = chrootRootDir + *i;
                 if (link(i->c_str(), p.c_str()) == -1) {
                     /* Hard-linking fails if we exceed the maximum
@@ -1890,6 +1946,9 @@ void DerivationGoal::startBuilder()
     }
 
     else {
+
+        if (pathExists(homeDir))
+            throw Error(format("directory `%1%' exists; please remove it") % homeDir);
 
         /* We're not doing a chroot build, but we have some valid
            output paths.  Since we can't just overwrite or delete
@@ -2028,9 +2087,9 @@ void DerivationGoal::initChild()
             /* Bind-mount all the directories from the "host"
                filesystem that we want in the chroot
                environment. */
-            foreach (PathSet::iterator, i, dirsInChroot) {
-                Path source = *i;
-                Path target = chrootRootDir + source;
+            foreach (DirsInChroot::iterator, i, dirsInChroot) {
+                Path source = i->second;
+                Path target = chrootRootDir + i->first;
                 if (source == "/proc") continue; // backwards compatibility
                 debug(format("bind mounting `%1%' to `%2%'") % source % target);
                 createDirs(target);
@@ -2145,8 +2204,8 @@ void DerivationGoal::initChild()
         throw SysError(format("executing `%1%'") % drv.builder);
 
     } catch (std::exception & e) {
-        std::cerr << format("build error: %1%") % e.what() << std::endl;
-        quickExit(inSetup ? childSetupFailed : 1);
+        writeToStderr("build error: " + string(e.what()) + "\n");
+        _exit(inSetup ? childSetupFailed : 1);
     }
 
     abort(); /* never reached */
@@ -2228,11 +2287,11 @@ void DerivationGoal::computeClosure()
             if (h != h2)
                 throw BuildError(
                     format("output path `%1%' should have %2% hash `%3%', instead has `%4%'")
-                    % path % i->second.hashAlgo % printHash(h) % printHash(h2));
+                    % path % i->second.hashAlgo % printHash16or32(h) % printHash16or32(h2));
         }
 
         /* Get rid of all weird permissions. */
-        canonicalisePathMetaData(path);
+        canonicalisePathMetaData(path, buildUser.enabled() ? buildUser.getUID() : -1);
 
         /* For this output path, find the references to other paths
            contained in it.  Compute the SHA-256 NAR hash at the same
@@ -2294,13 +2353,15 @@ Path DerivationGoal::openLogFile()
 {
     if (!settings.keepLog) return "";
 
+    string baseName = baseNameOf(drvPath);
+
     /* Create a log file. */
-    Path dir = (format("%1%/%2%") % settings.nixLogDir % drvsLogDir).str();
+    Path dir = (format("%1%/%2%/%3%/") % settings.nixLogDir % drvsLogDir % string(baseName, 0, 2)).str();
     createDirs(dir);
 
     if (settings.compressLog) {
 
-        Path logFileName = (format("%1%/%2%.bz2") % dir % baseNameOf(drvPath)).str();
+        Path logFileName = (format("%1%/%2%.bz2") % dir % string(baseName, 2)).str();
         AutoCloseFD fd = open(logFileName.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0666);
         if (fd == -1) throw SysError(format("creating log file `%1%'") % logFileName);
         closeOnExec(fd);
@@ -2315,7 +2376,7 @@ Path DerivationGoal::openLogFile()
         return logFileName;
 
     } else {
-        Path logFileName = (format("%1%/%2%") % dir % baseNameOf(drvPath)).str();
+        Path logFileName = (format("%1%/%2%") % dir % string(baseName, 2)).str();
         fdLogFile = open(logFileName.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0666);
         if (fdLogFile == -1) throw SysError(format("creating log file `%1%'") % logFileName);
         closeOnExec(fdLogFile);
@@ -2366,7 +2427,7 @@ void DerivationGoal::handleChildOutput(int fd, const string & data)
         (!hook && fd == builderOut.readSide))
     {
         if (verbosity >= settings.buildVerbosity)
-            writeToStderr((unsigned char *) data.data(), data.size());
+            writeToStderr(data);
         if (bzLogFile) {
             int err;
             BZ2_bzWrite(&err, bzLogFile, (unsigned char *) data.data(), data.size());
@@ -2376,7 +2437,7 @@ void DerivationGoal::handleChildOutput(int fd, const string & data)
     }
 
     if (hook && fd == hook->fromHook.readSide)
-        writeToStderr((unsigned char *) data.data(), data.size());
+        writeToStderr(data);
 }
 
 
@@ -2390,6 +2451,7 @@ PathSet DerivationGoal::checkPathValidity(bool returnValid, bool checkHash)
 {
     PathSet result;
     foreach (DerivationOutputs::iterator, i, drv.outputs) {
+        if (!wantOutput(i->first, wantedOutputs)) continue;
         bool good =
             worker.store.isValidPath(i->second.path) &&
             (!checkHash || worker.store.pathContentsGood(i->second.path));
@@ -2603,7 +2665,7 @@ void SubstitutionGoal::referencesValid()
 
     if (nrFailed > 0) {
         debug(format("some references of path `%1%' could not be realised") % storePath);
-        amDone(ecFailed);
+        amDone(nrNoSubstituters > 0 || nrIncompleteClosure > 0 ? ecIncompleteClosure : ecFailed);
         return;
     }
 
@@ -2666,8 +2728,19 @@ void SubstitutionGoal::tryToRun()
     if (pathExists(destPath))
         deletePathWrapped(destPath);
 
+    worker.store.setSubstituterEnv();
+
+    /* Fill in the arguments. */
+    Strings args;
+    args.push_back(baseNameOf(sub));
+    args.push_back("--substitute");
+    args.push_back(storePath);
+    args.push_back(destPath);
+    const char * * argArr = strings2CharPtrs(args);
+
     /* Fork the substitute program. */
-    pid = fork();
+    pid = maybeVfork();
+
     switch (pid) {
 
     case -1:
@@ -2680,29 +2753,15 @@ void SubstitutionGoal::tryToRun()
 
             if (dup2(outPipe.writeSide, STDOUT_FILENO) == -1)
                 throw SysError("cannot dup output pipe into stdout");
-            outPipe.readSide.close();
-            outPipe.writeSide.close();
-
-            /* Pass configuration options (including those overriden
-               with --option) to the substituter. */
-            setenv("_NIX_OPTIONS", settings.pack().c_str(), 1);
-
-            /* Fill in the arguments. */
-            Strings args;
-            args.push_back(baseNameOf(sub));
-            args.push_back("--substitute");
-            args.push_back(storePath);
-            args.push_back(destPath);
-            const char * * argArr = strings2CharPtrs(args);
 
             execv(sub.c_str(), (char * *) argArr);
 
             throw SysError(format("executing `%1%'") % sub);
 
         } catch (std::exception & e) {
-            std::cerr << format("substitute error: %1%") % e.what() << std::endl;
+            writeToStderr("substitute error: " + string(e.what()) + "\n");
         }
-        quickExit(1);
+        _exit(1);
     }
 
     /* parent */
@@ -2784,7 +2843,7 @@ void SubstitutionGoal::finished()
         return;
     }
 
-    canonicalisePathMetaData(destPath);
+    canonicalisePathMetaData(destPath, -1);
 
     worker.store.optimisePath(destPath); // FIXME: combine with hashPath()
 
@@ -2816,8 +2875,7 @@ void SubstitutionGoal::finished()
 void SubstitutionGoal::handleChildOutput(int fd, const string & data)
 {
     assert(fd == logPipe.readSide);
-    if (verbosity >= settings.buildVerbosity)
-        writeToStderr((unsigned char *) data.data(), data.size());
+    if (verbosity >= settings.buildVerbosity) writeToStderr(data);
     /* Don't write substitution output to a log file for now.  We
        probably should, though. */
 }
@@ -2860,14 +2918,15 @@ Worker::~Worker()
 }
 
 
-GoalPtr Worker::makeDerivationGoal(const Path & path, bool repair)
+GoalPtr Worker::makeDerivationGoal(const Path & path, const StringSet & wantedOutputs, bool repair)
 {
     GoalPtr goal = derivationGoals[path].lock();
     if (!goal) {
-        goal = GoalPtr(new DerivationGoal(path, *this, repair));
+        goal = GoalPtr(new DerivationGoal(path, wantedOutputs, *this, repair));
         derivationGoals[path] = goal;
         wakeUp(goal);
-    }
+    } else
+        (dynamic_cast<DerivationGoal *>(goal.get()))->addWantedOutputs(wantedOutputs);
     return goal;
 }
 
@@ -3206,11 +3265,13 @@ void LocalStore::buildPaths(const PathSet & drvPaths, bool repair)
     Worker worker(*this);
 
     Goals goals;
-    foreach (PathSet::const_iterator, i, drvPaths)
-        if (isDerivation(*i))
-            goals.insert(worker.makeDerivationGoal(*i, repair));
+    foreach (PathSet::const_iterator, i, drvPaths) {
+        DrvPathWithOutputs i2 = parseDrvPathWithOutputs(*i);
+        if (isDerivation(i2.first))
+            goals.insert(worker.makeDerivationGoal(i2.first, i2.second, repair));
         else
             goals.insert(worker.makeSubstitutionGoal(*i, repair));
+    }
 
     worker.run(goals);
 

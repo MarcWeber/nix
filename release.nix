@@ -1,15 +1,19 @@
-{ nixpkgs ? <nixpkgs>
-, nix ? { outPath = ./.; revCount = 1234; shortRev = "abcdef"; }
+{ nix ? { outPath = ./.; revCount = 1234; shortRev = "abcdef"; }
 , officialRelease ? false
 }:
 
 let
 
+  pkgs = import <nixpkgs> {};
+
+  systems = [ "x86_64-linux" "i686-linux" "x86_64-darwin" "x86_64-freebsd" "i686-freebsd" "i686-cygwin" "i686-solaris" ];
+
+
   jobs = rec {
 
 
     tarball =
-      with import nixpkgs {};
+      with pkgs;
 
       releaseTools.sourceTarball {
         name = "nix-tarball";
@@ -19,7 +23,7 @@ let
         inherit officialRelease;
 
         buildInputs =
-          [ curl bison25 flex2535 perl libxml2 libxslt w3m bzip2
+          [ curl bison flex2535 perl libxml2 libxslt w3m bzip2
             tetex dblatex nukeReferences pkgconfig sqlite git
           ];
 
@@ -42,6 +46,15 @@ let
           export VARTEXFONTS=$TMPDIR/texfonts
         '';
 
+        distPhase =
+          ''
+            runHook preDist
+            make dist-gzip
+            make dist-xz
+            mkdir -p $out/tarballs
+            cp *.tar.* $out/tarballs
+          '';
+
         preDist = ''
           make -C doc/manual install prefix=$out
 
@@ -63,10 +76,9 @@ let
       };
 
 
-    build =
-      { system ? "x86_64-linux" }:
+    build = pkgs.lib.genAttrs systems (system:
 
-      with import nixpkgs { inherit system; };
+      with import <nixpkgs> { inherit system; };
 
       releaseTools.nixBuild {
         name = "nix";
@@ -80,20 +92,25 @@ let
           --with-dbd-sqlite=${perlPackages.DBDSQLite}/${perl.libPrefix}
           --with-www-curl=${perlPackages.WWWCurl}/${perl.libPrefix}
           --enable-gc
+          --sysconfdir=/etc
         '';
 
         enableParallelBuilding = true;
 
+        makeFlags = "profiledir=$(out)/etc/profile.d";
+
+        installFlags = "sysconfdir=$(out)/etc";
+
         doInstallCheck = true;
-      };
+      });
 
-    binaryTarball =
-      { system ? "x86_64-linux" }:
 
-      with import nixpkgs { inherit system; };
+    binaryTarball = pkgs.lib.genAttrs systems (system:
+
+      with import <nixpkgs> { inherit system; };
 
       let
-        toplevel = build { inherit system; };
+        toplevel = builtins.getAttr system jobs.build;
         version = toplevel.src.version;
       in
 
@@ -116,11 +133,11 @@ let
             --transform "s,$TMPDIR/install,/usr/bin/nix-finish-install," \
             --transform "s,$TMPDIR/reginfo,/nix/store/reginfo," \
             $TMPDIR/install $TMPDIR/reginfo $storePaths
-        '';
+        '');
 
 
     coverage =
-      with import nixpkgs { system = "x86_64-linux"; };
+      with import <nixpkgs> { system = "x86_64-linux"; };
 
       releaseTools.coverageAnalysis {
         name = "nix-build";
@@ -169,15 +186,17 @@ let
     deb_ubuntu1110x86_64 = makeDeb_x86_64 (diskImageFuns: diskImageFuns.ubuntu1110x86_64) 60;
     deb_ubuntu1204i386 = makeDeb_i686 (diskImageFuns: diskImageFuns.ubuntu1204i386) 60;
     deb_ubuntu1204x86_64 = makeDeb_x86_64 (diskImageFuns: diskImageFuns.ubuntu1204x86_64) 60;
+    deb_ubuntu1210i386 = makeDeb_i686 (diskImageFuns: diskImageFuns.ubuntu1210i386) 70;
+    deb_ubuntu1210x86_64 = makeDeb_x86_64 (diskImageFuns: diskImageFuns.ubuntu1210x86_64) 70;
 
 
     # System tests.
     tests.remote_builds = (import ./tests/remote-builds.nix rec {
-      nix = build { inherit system; }; system = "x86_64-linux";
+      nix = build.x86_64-linux; system = "x86_64-linux";
     }).test;
 
     tests.nix_copy_closure = (import ./tests/nix-copy-closure.nix rec {
-      nix = build { inherit system; }; system = "x86_64-linux";
+      nix = build.x86_64-linux; system = "x86_64-linux";
     }).test;
 
   };
@@ -189,7 +208,7 @@ let
   makeRPM =
     system: diskImageFun: prio:
 
-    with import nixpkgs { inherit system; };
+    with import <nixpkgs> { inherit system; };
 
     releaseTools.rpmBuild rec {
       name = "nix-rpm";
@@ -208,7 +227,7 @@ let
   makeDeb =
     system: diskImageFun: prio:
 
-    with import nixpkgs { inherit system; };
+    with import <nixpkgs> { inherit system; };
 
     releaseTools.debBuild {
       name = "nix-deb";
@@ -218,7 +237,7 @@ let
       memSize = 1024;
       meta.schedulingPriority = prio;
       configureFlags = "--sysconfdir=/etc";
-      debRequires = [ "curl" "libdbd-sqlite3-perl" "libsqlite3-0" "libbz2-1.0" ];
+      debRequires = [ "curl" "libdbd-sqlite3-perl" "libsqlite3-0" "libbz2-1.0" "bzip2" "xz-utils" "libwww-curl-perl" ];
       doInstallCheck = true;
     };
 

@@ -5,7 +5,7 @@
 #include "pathlocks.hh"
 #include "worker-protocol.hh"
 #include "derivations.hh"
-#include "immutable.hh"
+#include "affinity.hh"
 
 #include <iostream>
 #include <algorithm>
@@ -20,9 +20,16 @@
 #include <stdio.h>
 #include <time.h>
 
-#if HAVE_UNSHARE
+#if HAVE_UNSHARE && HAVE_STATVFS && HAVE_SYS_MOUNT_H
 #include <sched.h>
+#include <sys/statvfs.h>
 #include <sys/mount.h>
+#endif
+
+#if HAVE_LINUX_FS_H
+#include <linux/fs.h>
+#include <sys/ioctl.h>
+#include <errno.h>
 #endif
 
 #include <sqlite3.h>
@@ -42,13 +49,17 @@ static void throwSQLiteError(sqlite3 * db, const format & f)
 {
     int err = sqlite3_errcode(db);
     if (err == SQLITE_BUSY) {
-        printMsg(lvlError, "warning: SQLite database is busy");
+        static bool warned = false;
+        if (!warned) {
+            printMsg(lvlError, "warning: SQLite database is busy");
+            warned = true;
+        }
         /* Sleep for a while since retrying the transaction right away
            is likely to fail again. */
 #if HAVE_NANOSLEEP
         struct timespec t;
         t.tv_sec = 0;
-        t.tv_nsec = 100 * 1000 * 1000; /* 0.1s */
+        t.tv_nsec = (random() % 100) * 1000 * 1000; /* <= 0.1s */
         nanosleep(&t, 0);
 #else
         sleep(1);
@@ -202,6 +213,7 @@ void checkStoreNotSymlink()
 
 
 LocalStore::LocalStore(bool reserveSpace)
+    : didSetSubstituterEnv(false)
 {
     schemaPath = settings.nixDBPath + "/schema";
 
@@ -291,6 +303,7 @@ LocalStore::LocalStore(bool reserveSpace)
         curSchema = getSchema();
 
         if (curSchema < 6) upgradeStore6();
+        else if (curSchema < 7) { upgradeStore7(); openDB(true); }
 
         writeFile(schemaPath, (format("%1%") % nixSchemaVersion).str());
 
@@ -305,8 +318,10 @@ LocalStore::~LocalStore()
 {
     try {
         foreach (RunningSubstituters::iterator, i, runningSubstituters) {
+            if (i->second.disabled) continue;
             i->second.to.close();
             i->second.from.close();
+            i->second.error.close();
             i->second.pid.wait(true);
         }
     } catch (...) {
@@ -366,10 +381,10 @@ void LocalStore::openDB(bool create)
         sqlite3_exec(db, ("pragma main.journal_mode = " + mode + ";").c_str(), 0, 0, 0) != SQLITE_OK)
         throwSQLiteError(db, "setting journal mode");
 
-    /* Increase the auto-checkpoint interval to 8192 pages.  This
+    /* Increase the auto-checkpoint interval to 40000 pages.  This
        seems enough to ensure that instantiating the NixOS system
        derivation is done in a single fsync(). */
-    if (mode == "wal" && sqlite3_exec(db, "pragma wal_autocheckpoint = 8192;", 0, 0, 0) != SQLITE_OK)
+    if (mode == "wal" && sqlite3_exec(db, "pragma wal_autocheckpoint = 40000;", 0, 0, 0) != SQLITE_OK)
         throwSQLiteError(db, "setting autocheckpoint interval");
 
     /* Initialise the database schema, if necessary. */
@@ -423,30 +438,20 @@ void LocalStore::openDB(bool create)
    bind mount.  So make the Nix store writable for this process. */
 void LocalStore::makeStoreWritable()
 {
-#if HAVE_UNSHARE
+#if HAVE_UNSHARE && HAVE_STATVFS && HAVE_SYS_MOUNT_H && defined(MS_BIND) && defined(MS_REMOUNT)
     if (getuid() != 0) return;
+    /* Check if /nix/store is on a read-only mount. */
+    struct statvfs stat;
+    if (statvfs(settings.nixStore.c_str(), &stat) !=0)
+        throw SysError("Getting info of nix store mountpoint");
 
-    if (!pathExists("/proc/self/mountinfo")) return;
+    if (stat.f_flag & ST_RDONLY) {
+        if (unshare(CLONE_NEWNS) == -1)
+            throw SysError("setting up a private mount namespace");
 
-    /* Check if /nix/store is a read-only bind mount. */
-    bool found = false;
-    Strings mounts = tokenizeString<Strings>(readFile("/proc/self/mountinfo", true), "\n");
-    foreach (Strings::iterator, i, mounts) {
-        vector<string> fields = tokenizeString<vector<string> >(*i, " ");
-        if (fields.at(3) == "/" || fields.at(4) != settings.nixStore) continue;
-        Strings options = tokenizeString<Strings>(fields.at(5), ",");
-        if (std::find(options.begin(), options.end(), "ro") == options.end()) continue;
-        found = true;
-        break;
+        if (mount(0, settings.nixStore.c_str(), 0, MS_REMOUNT | MS_BIND, 0) == -1)
+            throw SysError(format("remounting %1% writable") % settings.nixStore);
     }
-
-    if (!found) return;
-
-    if (unshare(CLONE_NEWNS) == -1)
-        throw SysError("setting up a private mount namespace");
-
-    if (mount(0, settings.nixStore.c_str(), 0, MS_REMOUNT | MS_BIND, 0) == -1)
-        throw SysError(format("remounting %1% writable") % settings.nixStore);
 #endif
 }
 
@@ -454,36 +459,8 @@ void LocalStore::makeStoreWritable()
 const time_t mtimeStore = 1; /* 1 second into the epoch */
 
 
-void canonicalisePathMetaData(const Path & path, bool recurse)
+static void canonicaliseTimestampAndPermissions(const Path & path, const struct stat & st)
 {
-    checkInterrupt();
-
-    struct stat st;
-    if (lstat(path.c_str(), &st))
-        throw SysError(format("getting attributes of path `%1%'") % path);
-
-    /* Really make sure that the path is of a supported type.  This
-       has already been checked in dumpPath(). */
-    assert(S_ISREG(st.st_mode) || S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode));
-
-    /* Change ownership to the current uid.  If it's a symlink, use
-       lchown if available, otherwise don't bother.  Wrong ownership
-       of a symlink doesn't matter, since the owning user can't change
-       the symlink and can't delete it because the directory is not
-       writable.  The only exception is top-level paths in the Nix
-       store (since that directory is group-writable for the Nix build
-       users group); we check for this case below. */
-    if (st.st_uid != geteuid()) {
-#if HAVE_LCHOWN
-        if (lchown(path.c_str(), geteuid(), (gid_t) -1) == -1)
-#else
-        if (!S_ISLNK(st.st_mode) &&
-            chown(path.c_str(), geteuid(), (gid_t) -1) == -1)
-#endif
-            throw SysError(format("changing owner of `%1%' to %2%")
-                % path % geteuid());
-    }
-
     if (!S_ISLNK(st.st_mode)) {
 
         /* Mask out all type related bits. */
@@ -507,23 +484,85 @@ void canonicalisePathMetaData(const Path & path, bool recurse)
         times[1].tv_usec = 0;
 #if HAVE_LUTIMES
         if (lutimes(path.c_str(), times) == -1)
+            if (errno != ENOSYS ||
+                (!S_ISLNK(st.st_mode) && utimes(path.c_str(), times) == -1))
 #else
         if (!S_ISLNK(st.st_mode) && utimes(path.c_str(), times) == -1)
 #endif
             throw SysError(format("changing modification time of `%1%'") % path);
     }
+}
 
-    if (recurse && S_ISDIR(st.st_mode)) {
+
+void canonicaliseTimestampAndPermissions(const Path & path)
+{
+    struct stat st;
+    if (lstat(path.c_str(), &st))
+        throw SysError(format("getting attributes of path `%1%'") % path);
+    canonicaliseTimestampAndPermissions(path, st);
+}
+
+
+static void canonicalisePathMetaData_(const Path & path, uid_t fromUid, InodesSeen & inodesSeen)
+{
+    checkInterrupt();
+
+    struct stat st;
+    if (lstat(path.c_str(), &st))
+        throw SysError(format("getting attributes of path `%1%'") % path);
+
+    /* Really make sure that the path is of a supported type.  This
+       has already been checked in dumpPath(). */
+    assert(S_ISREG(st.st_mode) || S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode));
+
+    /* Fail if the file is not owned by the build user.  This prevents
+       us from messing up the ownership/permissions of files
+       hard-linked into the output (e.g. "ln /etc/shadow $out/foo").
+       However, ignore files that we chown'ed ourselves previously to
+       ensure that we don't fail on hard links within the same build
+       (i.e. "touch $out/foo; ln $out/foo $out/bar"). */
+    if (fromUid != (uid_t) -1 && st.st_uid != fromUid) {
+        assert(!S_ISDIR(st.st_mode));
+        if (inodesSeen.find(Inode(st.st_dev, st.st_ino)) == inodesSeen.end())
+            throw BuildError(format("invalid ownership on file `%1%'") % path);
+        mode_t mode = st.st_mode & ~S_IFMT;
+        assert(S_ISLNK(st.st_mode) || (st.st_uid == geteuid() && (mode == 0444 || mode == 0555) && st.st_mtime == mtimeStore));
+        return;
+    }
+
+    inodesSeen.insert(Inode(st.st_dev, st.st_ino));
+
+    canonicaliseTimestampAndPermissions(path, st);
+
+    /* Change ownership to the current uid.  If it's a symlink, use
+       lchown if available, otherwise don't bother.  Wrong ownership
+       of a symlink doesn't matter, since the owning user can't change
+       the symlink and can't delete it because the directory is not
+       writable.  The only exception is top-level paths in the Nix
+       store (since that directory is group-writable for the Nix build
+       users group); we check for this case below. */
+    if (st.st_uid != geteuid()) {
+#if HAVE_LCHOWN
+        if (lchown(path.c_str(), geteuid(), (gid_t) -1) == -1)
+#else
+        if (!S_ISLNK(st.st_mode) &&
+            chown(path.c_str(), geteuid(), (gid_t) -1) == -1)
+#endif
+            throw SysError(format("changing owner of `%1%' to %2%")
+                % path % geteuid());
+    }
+
+    if (S_ISDIR(st.st_mode)) {
         Strings names = readDirectory(path);
         foreach (Strings::iterator, i, names)
-            canonicalisePathMetaData(path + "/" + *i, true);
+            canonicalisePathMetaData_(path + "/" + *i, fromUid, inodesSeen);
     }
 }
 
 
-void canonicalisePathMetaData(const Path & path)
+void canonicalisePathMetaData(const Path & path, uid_t fromUid, InodesSeen & inodesSeen)
 {
-    canonicalisePathMetaData(path, true);
+    canonicalisePathMetaData_(path, fromUid, inodesSeen);
 
     /* On platforms that don't have lchown(), the top-level path can't
        be a symlink, since we can't change its ownership. */
@@ -535,6 +574,13 @@ void canonicalisePathMetaData(const Path & path)
         assert(S_ISLNK(st.st_mode));
         throw Error(format("wrong ownership of top-level store path `%1%'") % path);
     }
+}
+
+
+void canonicalisePathMetaData(const Path & path, uid_t fromUid)
+{
+    InodesSeen inodesSeen;
+    canonicalisePathMetaData(path, fromUid, inodesSeen);
 }
 
 
@@ -941,9 +987,21 @@ Path LocalStore::queryPathFromHashPart(const string & hashPart)
 }
 
 
+void LocalStore::setSubstituterEnv()
+{
+    if (didSetSubstituterEnv) return;
+
+    /* Pass configuration options (including those overridden with
+       --option) to substituters. */
+    setenv("_NIX_OPTIONS", settings.pack().c_str(), 1);
+
+    didSetSubstituterEnv = true;
+}
+
+
 void LocalStore::startSubstituter(const Path & substituter, RunningSubstituter & run)
 {
-    if (run.pid != -1) return;
+    if (run.disabled || run.pid != -1) return;
 
     debug(format("starting substituter program `%1%'") % substituter);
 
@@ -953,7 +1011,9 @@ void LocalStore::startSubstituter(const Path & substituter, RunningSubstituter &
     fromPipe.create();
     errorPipe.create();
 
-    run.pid = fork();
+    setSubstituterEnv();
+
+    run.pid = maybeVfork();
 
     switch (run.pid) {
 
@@ -962,45 +1022,108 @@ void LocalStore::startSubstituter(const Path & substituter, RunningSubstituter &
 
     case 0: /* child */
         try {
-            /* Hack to let "make check" succeed on Darwin.  The
-               libtool wrapper script sets DYLD_LIBRARY_PATH to our
-               libutil (among others), but Perl also depends on a
-               library named libutil.  As a result, substituters
-               written in Perl (i.e. all of them) fail. */
-            unsetenv("DYLD_LIBRARY_PATH");
-
-            /* Pass configuration options (including those overriden
-               with --option) to the substituter. */
-            setenv("_NIX_OPTIONS", settings.pack().c_str(), 1);
-
-            fromPipe.readSide.close();
-            toPipe.writeSide.close();
+            restoreAffinity();
             if (dup2(toPipe.readSide, STDIN_FILENO) == -1)
                 throw SysError("dupping stdin");
             if (dup2(fromPipe.writeSide, STDOUT_FILENO) == -1)
                 throw SysError("dupping stdout");
             if (dup2(errorPipe.writeSide, STDERR_FILENO) == -1)
                 throw SysError("dupping stderr");
-            closeMostFDs(set<int>());
             execl(substituter.c_str(), substituter.c_str(), "--query", NULL);
             throw SysError(format("executing `%1%'") % substituter);
         } catch (std::exception & e) {
             std::cerr << "error: " << e.what() << std::endl;
         }
-        quickExit(1);
+        _exit(1);
     }
 
     /* Parent. */
 
+    run.program = baseNameOf(substituter);
     run.to = toPipe.writeSide.borrow();
-    run.from = fromPipe.readSide.borrow();
+    run.from = run.fromBuf.fd = fromPipe.readSide.borrow();
     run.error = errorPipe.readSide.borrow();
+
+    toPipe.readSide.close();
+    fromPipe.writeSide.close();
+    errorPipe.writeSide.close();
+
+    /* The substituter may exit right away if it's disabled in any way
+       (e.g. copy-from-other-stores.pl will exit if no other stores
+       are configured). */
+    try {
+        getLineFromSubstituter(run);
+    } catch (EndOfFile & e) {
+        run.to.close();
+        run.from.close();
+        run.error.close();
+        run.disabled = true;
+        if (run.pid.wait(true) != 0) throw;
+    }
 }
 
 
-template<class T> T getIntLine(int fd)
+/* Read a line from the substituter's stdout, while also processing
+   its stderr. */
+string LocalStore::getLineFromSubstituter(RunningSubstituter & run)
 {
-    string s = readLine(fd);
+    string res, err;
+
+    /* We might have stdout data left over from the last time. */
+    if (run.fromBuf.hasData()) goto haveData;
+
+    while (1) {
+        checkInterrupt();
+
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(run.from, &fds);
+        FD_SET(run.error, &fds);
+
+        /* Wait for data to appear on the substituter's stdout or
+           stderr. */
+        if (select(run.from > run.error ? run.from + 1 : run.error + 1, &fds, 0, 0, 0) == -1) {
+            if (errno == EINTR) continue;
+            throw SysError("waiting for input from the substituter");
+        }
+
+        /* Completely drain stderr before dealing with stdout. */
+        if (FD_ISSET(run.error, &fds)) {
+            char buf[4096];
+            ssize_t n = read(run.error, (unsigned char *) buf, sizeof(buf));
+            if (n == -1) {
+                if (errno == EINTR) continue;
+                throw SysError("reading from substituter's stderr");
+            }
+            if (n == 0) throw EndOfFile(format("substituter `%1%' died unexpectedly") % run.program);
+            err.append(buf, n);
+            string::size_type p;
+            while ((p = err.find('\n')) != string::npos) {
+                printMsg(lvlError, run.program + ": " + string(err, 0, p));
+                err = string(err, p + 1);
+            }
+        }
+
+        /* Read from stdout until we get a newline or the buffer is empty. */
+        else if (run.fromBuf.hasData() || FD_ISSET(run.from, &fds)) {
+        haveData:
+            do {
+                unsigned char c;
+                run.fromBuf(&c, 1);
+                if (c == '\n') {
+                    if (!err.empty()) printMsg(lvlError, run.program + ": " + err);
+                    return res;
+                }
+                res += c;
+            } while (run.fromBuf.hasData());
+        }
+    }
+}
+
+
+template<class T> T LocalStore::getIntLineFromSubstituter(RunningSubstituter & run)
+{
+    string s = getLineFromSubstituter(run);
     T res;
     if (!string2Int(s, res)) throw Error("integer expected from stream");
     return res;
@@ -1014,6 +1137,7 @@ PathSet LocalStore::querySubstitutablePaths(const PathSet & paths)
         if (res.size() == paths.size()) break;
         RunningSubstituter & run(runningSubstituters[*i]);
         startSubstituter(*i, run);
+        if (run.disabled) continue;
         string s = "have ";
         foreach (PathSet::const_iterator, j, paths)
             if (res.find(*j) == res.end()) { s += *j; s += " "; }
@@ -1023,13 +1147,9 @@ PathSet LocalStore::querySubstitutablePaths(const PathSet & paths)
                substituters should only write (short) messages to
                stderr when they fail.  I.e. they shouldn't write debug
                output. */
-            try {
-                Path path = readLine(run.from);
-                if (path == "") break;
-                res.insert(path);
-            } catch (EndOfFile e) {
-                throw Error(format("substituter `%1%' failed: %2%") % *i % chomp(drainFD(run.error)));
-            }
+            Path path = getLineFromSubstituter(run);
+            if (path == "") break;
+            res.insert(path);
         }
     }
     return res;
@@ -1041,6 +1161,7 @@ void LocalStore::querySubstitutablePathInfos(const Path & substituter,
 {
     RunningSubstituter & run(runningSubstituters[substituter]);
     startSubstituter(substituter, run);
+    if (run.disabled) return;
 
     string s = "info ";
     foreach (PathSet::const_iterator, i, paths)
@@ -1048,26 +1169,22 @@ void LocalStore::querySubstitutablePathInfos(const Path & substituter,
     writeLine(run.to, s);
 
     while (true) {
-        try {
-            Path path = readLine(run.from);
-            if (path == "") break;
-            if (paths.find(path) == paths.end())
-                throw Error(format("got unexpected path `%1%' from substituter") % path);
-            paths.erase(path);
-            SubstitutablePathInfo & info(infos[path]);
-            info.deriver = readLine(run.from);
-            if (info.deriver != "") assertStorePath(info.deriver);
-            int nrRefs = getIntLine<int>(run.from);
-            while (nrRefs--) {
-                Path p = readLine(run.from);
-                assertStorePath(p);
-                info.references.insert(p);
-            }
-            info.downloadSize = getIntLine<long long>(run.from);
-            info.narSize = getIntLine<long long>(run.from);
-        } catch (EndOfFile e) {
-            throw Error(format("substituter `%1%' failed: %2%") % substituter % chomp(drainFD(run.error)));
+        Path path = getLineFromSubstituter(run);
+        if (path == "") break;
+        if (paths.find(path) == paths.end())
+            throw Error(format("got unexpected path `%1%' from substituter") % path);
+        paths.erase(path);
+        SubstitutablePathInfo & info(infos[path]);
+        info.deriver = getLineFromSubstituter(run);
+        if (info.deriver != "") assertStorePath(info.deriver);
+        int nrRefs = getIntLineFromSubstituter<int>(run);
+        while (nrRefs--) {
+            Path p = getLineFromSubstituter(run);
+            assertStorePath(p);
+            info.references.insert(p);
         }
+        info.downloadSize = getIntLineFromSubstituter<long long>(run);
+        info.narSize = getIntLineFromSubstituter<long long>(run);
     }
 }
 
@@ -1111,9 +1228,10 @@ void LocalStore::registerValidPaths(const ValidPathInfos & infos)
 
             foreach (ValidPathInfos::const_iterator, i, infos) {
                 assert(i->hash.type == htSHA256);
-                /* !!! Maybe the registration info should be updated if the
-                   path is already valid. */
-                if (!isValidPath(i->path)) addValidPath(*i);
+                if (isValidPath(i->path))
+                    updatePathInfo(*i);
+                else
+                    addValidPath(*i);
                 paths.insert(i->path);
             }
 
@@ -1185,7 +1303,7 @@ Path LocalStore::addToStoreFromDump(const string & dump, const string & name,
             } else
                 writeFile(dstPath, dump);
 
-            canonicalisePathMetaData(dstPath);
+            canonicalisePathMetaData(dstPath, -1);
 
             /* Register the SHA-256 hash of the NAR serialisation of
                the path in the database.  We may just have computed it
@@ -1250,7 +1368,7 @@ Path LocalStore::addTextToStore(const string & name, const string & s,
 
             writeFile(dstPath, s);
 
-            canonicalisePathMetaData(dstPath);
+            canonicalisePathMetaData(dstPath, -1);
 
             HashResult hash = hashPath(htSHA256, dstPath);
 
@@ -1485,7 +1603,7 @@ Path LocalStore::importPath(bool requireSignature, Source & source)
                 throw SysError(format("cannot move `%1%' to `%2%'")
                     % unpacked % dstPath);
 
-            canonicalisePathMetaData(dstPath);
+            canonicalisePathMetaData(dstPath, -1);
 
             /* !!! if we were clever, we could prevent the hashPath()
                here. */
@@ -1782,6 +1900,59 @@ void LocalStore::upgradeStore6()
 
     txn.commit();
 }
+
+
+#if defined(FS_IOC_SETFLAGS) && defined(FS_IOC_GETFLAGS) && defined(FS_IMMUTABLE_FL)
+
+static void makeMutable(const Path & path)
+{
+    checkInterrupt();
+
+    struct stat st = lstat(path);
+
+    if (!S_ISDIR(st.st_mode) && !S_ISREG(st.st_mode)) return;
+
+    if (S_ISDIR(st.st_mode)) {
+        Strings names = readDirectory(path);
+        foreach (Strings::iterator, i, names)
+            makeMutable(path + "/" + *i);
+    }
+
+    /* The O_NOFOLLOW is important to prevent us from changing the
+       mutable bit on the target of a symlink (which would be a
+       security hole). */
+    AutoCloseFD fd = open(path.c_str(), O_RDONLY | O_NOFOLLOW);
+    if (fd == -1) {
+        if (errno == ELOOP) return; // it's a symlink
+        throw SysError(format("opening file `%1%'") % path);
+    }
+
+    unsigned int flags = 0, old;
+
+    /* Silently ignore errors getting/setting the immutable flag so
+       that we work correctly on filesystems that don't support it. */
+    if (ioctl(fd, FS_IOC_GETFLAGS, &flags)) return;
+    old = flags;
+    flags &= ~FS_IMMUTABLE_FL;
+    if (old == flags) return;
+    if (ioctl(fd, FS_IOC_SETFLAGS, &flags)) return;
+}
+
+/* Upgrade from schema 6 (Nix 0.15) to schema 7 (Nix >= 1.3). */
+void LocalStore::upgradeStore7()
+{
+    if (getuid() != 0) return;
+    printMsg(lvlError, "removing immutable bits from the Nix store (this may take a while)...");
+    makeMutable(settings.nixStore);
+}
+
+#else
+
+void LocalStore::upgradeStore7()
+{
+}
+
+#endif
 
 
 void LocalStore::vacuumDB()

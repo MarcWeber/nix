@@ -283,7 +283,7 @@ $ mount -o bind /mnt/otherdisk/nix /nix</screen>
 
   <listitem><para>This variable should be set to
   <literal>daemon</literal> if you want to use the Nix daemon to
-  executed Nix operations, which is necessary in <link
+  execute Nix operations. This is necessary in <link
   linkend="ssec-multi-user">multi-user Nix installations</link>.
   Otherwise, it should be left unset.</para></listitem>
 
@@ -293,7 +293,7 @@ $ mount -o bind /mnt/otherdisk/nix /nix</screen>
 <varlistentry xml:id="envar-other-stores"><term><envar>NIX_OTHER_STORES</envar></term>
 
   <listitem><para>This variable contains the paths of remote Nix
-  installations from whichs paths can be copied, separated by colons.
+  installations from which packages can be copied, separated by colons.
   <phrase condition="manual">See <xref linkend="sec-sharing-packages"
   /> for details.</phrase>  Each path should be the
   <filename>/nix</filename> directory of a remote Nix installation

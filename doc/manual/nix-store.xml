@@ -164,7 +164,7 @@ the specified store paths.  Realisation is a somewhat overloaded term:
   exist in the file system).  If the path is already valid, we are
   done immediately.  Otherwise, the path and any missing paths in its
   closure may be produced through substitutes.  If there are no
-  (succesful) subsitutes, realisation fails.</para></listitem>
+  (successful) subsitutes, realisation fails.</para></listitem>
 
 </itemizedlist>
 
@@ -182,7 +182,14 @@ printed.)</para>
 
     <listitem><para>Print on standard error a description of what
     packages would be built or downloaded, without actually performing
-    the operation</para></listitem>
+    the operation.</para></listitem>
+
+  </varlistentry>
+
+  <varlistentry><term><option>--ignore-unknown</option></term>
+
+    <listitem><para>If a non-derivation path does not have a
+    substitute, then silently ignore it.</para></listitem>
 
   </varlistentry>
 
@@ -845,7 +852,7 @@ in Nix itself.</para>
 
 <refsection><title>Description</title>
             
-<para>The operation <option>--verify-paths</option> compares the
+<para>The operation <option>--verify-path</option> compares the
 contents of the given store paths to their cryptographic hashes stored
 in Nix’s database.  For every changed path, it prints a warning
 message.  The exit status is 0 if no path has changed, and 1
@@ -1235,9 +1242,9 @@ variable <envar>_args</envar>.</para>
 $ nix-store --print-env $(nix-instantiate '&lt;nixpkgs>' -A firefox)
 <replaceable>…</replaceable>
 export src; src='/nix/store/plpj7qrwcz94z2psh6fchsi7s8yihc7k-firefox-12.0.source.tar.bz2'
-export stdenv; stdenv='/nix/store/7c8asx3yfrg5dg1gzhzyq2236zfgibnm-stdenv'
+export stdenv; stdenv='/nix/store/7c8asx3yfrg5dg1gzhzyq2236zfgibnn-stdenv'
 export system; system='x86_64-linux'
-export _args; _args='-e /nix/store/9krlzvny65gdc8s7kpb6lkx8cd02c25b-default-builder.sh'
+export _args; _args='-e /nix/store/9krlzvny65gdc8s7kpb6lkx8cd02c25c-default-builder.sh'
 </screen>
 
 </refsection>

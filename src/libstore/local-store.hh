@@ -17,8 +17,8 @@ namespace nix {
 /* Nix store and database schema version.  Version 1 (or 0) was Nix <=
    0.7.  Version 2 was Nix 0.8 and 0.9.  Version 3 is Nix 0.10.
    Version 4 is Nix 0.11.  Version 5 is Nix 0.12-0.16.  Version 6 is
-   Nix 1.0. */
-const int nixSchemaVersion = 6;
+   Nix 1.0.  Version 7 is Nix 1.3. */
+const int nixSchemaVersion = 7;
 
 
 extern string drvsLogDir;
@@ -44,8 +44,12 @@ struct OptimiseStats
 
 struct RunningSubstituter
 {
+    Path program;
     Pid pid;
     AutoCloseFD to, from, error;
+    FdSource fromBuf;
+    bool disabled;
+    RunningSubstituter() : disabled(false) { };
 };
 
 
@@ -111,10 +115,6 @@ public:
 
     Path queryDeriver(const Path & path);
 
-    /* Return all currently valid derivations that have `path' as an
-       output.  (Note that the result of `queryDeriver()' is the
-       derivation that was actually used to produce `path', which may
-       not exist anymore.) */
     PathSet queryValidDerivers(const Path & path);
 
     PathSet queryDerivationOutputs(const Path & path);
@@ -177,7 +177,7 @@ public:
 
     /* Register the validity of a path, i.e., that `path' exists, that
        the paths referenced by it exists, and in the case of an output
-       path of a derivation, that it has been produced by a succesful
+       path of a derivation, that it has been produced by a successful
        execution of the derivation (or something equivalent).  Also
        register the hash of the file system contents of the path.  The
        hash must be a SHA-256 hash. */
@@ -207,6 +207,8 @@ public:
     bool pathContentsGood(const Path & path);
 
     void markContentsGood(const Path & path);
+
+    void setSubstituterEnv();
 
 private:
 
@@ -238,6 +240,8 @@ private:
     /* Cache for pathContentsGood(). */
     std::map<Path, bool> pathContentsGoodCache;
 
+    bool didSetSubstituterEnv;
+
     int getSchema();
 
     void openDB(bool create);
@@ -265,6 +269,7 @@ private:
     void updatePathInfo(const ValidPathInfo & info);
 
     void upgradeStore6();
+    void upgradeStore7();
     PathSet queryValidPathsOld();
     ValidPathInfo queryPathInfoOld(const Path & path);
 
@@ -272,7 +277,11 @@ private:
 
     void deleteGarbage(GCState & state, const Path & path);
 
-    bool tryToDelete(GCState & state, const Path & path);
+    void tryToDelete(GCState & state, const Path & path);
+
+    bool canReachRoot(GCState & state, PathSet & visited, const Path & path);
+
+    void deletePathRecursive(GCState & state, const Path & path);
 
     bool isActiveTempFile(const GCState & state,
         const Path & path, const string & suffix);
@@ -284,6 +293,10 @@ private:
     void startSubstituter(const Path & substituter,
         RunningSubstituter & runningSubstituter);
 
+    string getLineFromSubstituter(RunningSubstituter & run);
+
+    template<class T> T getIntLineFromSubstituter(RunningSubstituter & run);
+
     Path createTempDirInStore();
 
     Path importPath(bool requireSignature, Source & source);
@@ -294,6 +307,10 @@ private:
 };
 
 
+typedef std::pair<dev_t, ino_t> Inode;
+typedef set<Inode> InodesSeen;
+
+
 /* "Fix", or canonicalise, the meta-data of the files in a store path
    after it has been built.  In particular:
    - the last modification date on each file is set to 1 (i.e.,
@@ -302,9 +319,10 @@ private:
      without execute permission; setuid bits etc. are cleared)
    - the owner and group are set to the Nix user and group, if we're
      in a setuid Nix installation. */
-void canonicalisePathMetaData(const Path & path);
+void canonicalisePathMetaData(const Path & path, uid_t fromUid, InodesSeen & inodesSeen);
+void canonicalisePathMetaData(const Path & path, uid_t fromUid);
 
-void canonicalisePathMetaData(const Path & path, bool recurse);
+void canonicaliseTimestampAndPermissions(const Path & path);
 
 MakeError(PathInUse, Error);
 

@@ -79,4 +79,15 @@ typedef std::map<Path, Hash> DrvHashes;
 
 extern DrvHashes drvHashes;
 
+/* Split a string specifying a derivation and a set of outputs
+   (/nix/store/hash-foo!out1,out2,...) into the derivation path and
+   the outputs. */
+typedef std::pair<string, std::set<string> > DrvPathWithOutputs;
+DrvPathWithOutputs parseDrvPathWithOutputs(const string & s);
+
+Path makeDrvPathWithOutputs(const Path & drvPath, const std::set<string> & outputs);
+
+bool wantOutput(const string & output, const std::set<string> & wanted);
+
+
 }

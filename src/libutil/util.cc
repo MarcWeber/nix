@@ -12,8 +12,11 @@
 #include <fcntl.h>
 #include <limits.h>
 
+#ifdef __APPLE__
+#include <sys/syscall.h>
+#endif
+
 #include "util.hh"
-#include "immutable.hh"
 
 
 extern char * * environ;
@@ -100,7 +103,7 @@ Path canonPath(const Path & path, bool resolveSymlinks)
             i++;
 
         /* If `..', delete the last component. */
-        else if (*i == '.' && i + 1 < end && i[1] == '.' && 
+        else if (*i == '.' && i + 1 < end && i[1] == '.' &&
             (i + 2 == end || i[2] == '/'))
         {
             if (!s.empty()) s.erase(s.rfind('/'));
@@ -146,6 +149,15 @@ string baseNameOf(const Path & path)
     if (pos == string::npos)
         throw Error(format("invalid file name `%1%'") % path);
     return string(path, pos + 1);
+}
+
+
+bool isInDir(const Path & path, const Path & dir)
+{
+    return path[0] == '/'
+        && string(path, 0, dir.size()) == dir
+        && path.size() >= dir.size() + 2
+        && path[dir.size()] == '/';
 }
 
 
@@ -215,7 +227,7 @@ string readFile(int fd)
     struct stat st;
     if (fstat(fd, &st) == -1)
         throw SysError("statting file");
-    
+
     unsigned char * buf = new unsigned char[st.st_size];
     AutoDeleteArray<unsigned char> d(buf);
     readFull(fd, buf, st.st_size);
@@ -280,9 +292,9 @@ static void _computePathSize(const Path & path,
     blocks += st.st_blocks;
 
     if (S_ISDIR(st.st_mode)) {
-	Strings names = readDirectory(path);
+        Strings names = readDirectory(path);
 
-	for (Strings::iterator i = names.begin(); i != names.end(); ++i)
+        for (Strings::iterator i = names.begin(); i != names.end(); ++i)
             _computePathSize(path + "/" + *i, bytes, blocks);
     }
 }
@@ -305,21 +317,19 @@ static void _deletePath(const Path & path, unsigned long long & bytesFreed)
 
     struct stat st = lstat(path);
 
-    if (S_ISDIR(st.st_mode) || S_ISREG(st.st_mode)) makeMutable(path);
-
     if (!S_ISDIR(st.st_mode) && st.st_nlink == 1)
         bytesFreed += st.st_blocks * 512;
 
     if (S_ISDIR(st.st_mode)) {
-	Strings names = readDirectory(path);
+        Strings names = readDirectory(path);
 
-	/* Make the directory writable. */
-	if (!(st.st_mode & S_IWUSR)) {
-	    if (chmod(path.c_str(), st.st_mode | S_IWUSR) == -1)
-		throw SysError(format("making `%1%' writable") % path);
-	}
+        /* Make the directory writable. */
+        if (!(st.st_mode & S_IWUSR)) {
+            if (chmod(path.c_str(), st.st_mode | S_IWUSR) == -1)
+                throw SysError(format("making `%1%' writable") % path);
+        }
 
-	for (Strings::iterator i = names.begin(); i != names.end(); ++i)
+        for (Strings::iterator i = names.begin(); i != names.end(); ++i)
             _deletePath(path + "/" + *i, bytesFreed);
     }
 
@@ -351,14 +361,14 @@ void makePathReadOnly(const Path & path)
     struct stat st = lstat(path);
 
     if (!S_ISLNK(st.st_mode) && (st.st_mode & S_IWUSR)) {
-	if (chmod(path.c_str(), st.st_mode & ~S_IWUSR) == -1)
-	    throw SysError(format("making `%1%' read-only") % path);
+        if (chmod(path.c_str(), st.st_mode & ~S_IWUSR) == -1)
+            throw SysError(format("making `%1%' read-only") % path);
     }
 
     if (S_ISDIR(st.st_mode)) {
         Strings names = readDirectory(path);
-	for (Strings::iterator i = names.begin(); i != names.end(); ++i)
-	    makePathReadOnly(path + "/" + *i);
+        for (Strings::iterator i = names.begin(); i != names.end(); ++i)
+            makePathReadOnly(path + "/" + *i);
     }
 }
 
@@ -380,25 +390,25 @@ Path createTempDir(const Path & tmpRoot, const Path & prefix,
     static int globalCounter = 0;
     int localCounter = 0;
     int & counter(useGlobalCounter ? globalCounter : localCounter);
-    
+
     while (1) {
         checkInterrupt();
-	Path tmpDir = tempName(tmpRoot, prefix, includePid, counter);
-	if (mkdir(tmpDir.c_str(), mode) == 0) {
-	    /* Explicitly set the group of the directory.  This is to
-	       work around around problems caused by BSD's group
-	       ownership semantics (directories inherit the group of
-	       the parent).  For instance, the group of /tmp on
-	       FreeBSD is "wheel", so all directories created in /tmp
-	       will be owned by "wheel"; but if the user is not in
-	       "wheel", then "tar" will fail to unpack archives that
-	       have the setgid bit set on directories. */
-	    if (chown(tmpDir.c_str(), (uid_t) -1, getegid()) != 0)
-		throw SysError(format("setting group of directory `%1%'") % tmpDir);
-	    return tmpDir;
-	}
-	if (errno != EEXIST)
-	    throw SysError(format("creating directory `%1%'") % tmpDir);
+        Path tmpDir = tempName(tmpRoot, prefix, includePid, counter);
+        if (mkdir(tmpDir.c_str(), mode) == 0) {
+            /* Explicitly set the group of the directory.  This is to
+               work around around problems caused by BSD's group
+               ownership semantics (directories inherit the group of
+               the parent).  For instance, the group of /tmp on
+               FreeBSD is "wheel", so all directories created in /tmp
+               will be owned by "wheel"; but if the user is not in
+               "wheel", then "tar" will fail to unpack archives that
+               have the setgid bit set on directories. */
+            if (chown(tmpDir.c_str(), (uid_t) -1, getegid()) != 0)
+                throw SysError(format("setting group of directory `%1%'") % tmpDir);
+            return tmpDir;
+        }
+        if (errno != EEXIST)
+            throw SysError(format("creating directory `%1%'") % tmpDir);
     }
 }
 
@@ -418,7 +428,7 @@ Paths createDirs(const Path & path)
     }
 
     if (!S_ISDIR(st.st_mode)) throw Error(format("`%1%' is not a directory") % path);
-    
+
     return created;
 }
 
@@ -483,16 +493,7 @@ void printMsg_(Verbosity level, const format & f)
     else if (logType == ltEscapes && level != lvlInfo)
         prefix = "\033[" + escVerbosity(level) + "s";
     string s = (format("%1%%2%\n") % prefix % f.str()).str();
-    try {
-        writeToStderr((const unsigned char *) s.data(), s.size());
-    } catch (SysError & e) {
-        /* Ignore failing writes to stderr if we're in an exception
-           handler, otherwise throw an exception.  We need to ignore
-           write errors in exception handlers to ensure that cleanup
-           code runs to completion if the other side of stderr has
-           been closed unexpectedly. */
-        if (!std::uncaught_exception()) throw;
-    }
+    writeToStderr(s);
 }
 
 
@@ -505,13 +506,28 @@ void warnOnce(bool & haveWarned, const format & f)
 }
 
 
+void writeToStderr(const string & s)
+{
+    try {
+        _writeToStderr((const unsigned char *) s.data(), s.size());
+    } catch (SysError & e) {
+        /* Ignore failing writes to stderr if we're in an exception
+           handler, otherwise throw an exception.  We need to ignore
+           write errors in exception handlers to ensure that cleanup
+           code runs to completion if the other side of stderr has
+           been closed unexpectedly. */
+        if (!std::uncaught_exception()) throw;
+    }
+}
+
+
 static void defaultWriteToStderr(const unsigned char * buf, size_t count)
 {
     writeFull(STDERR_FILENO, buf, count);
 }
 
 
-void (*writeToStderr) (const unsigned char * buf, size_t count) = defaultWriteToStderr;
+void (*_writeToStderr) (const unsigned char * buf, size_t count) = defaultWriteToStderr;
 
 
 void readFull(int fd, unsigned char * buf, size_t count)
@@ -613,8 +629,8 @@ AutoCloseFD::AutoCloseFD(int fd)
 
 AutoCloseFD::AutoCloseFD(const AutoCloseFD & fd)
 {
-    /* Copying a AutoCloseFD isn't allowed (who should get to close
-       it?).  But as a edge case, allow copying of closed
+    /* Copying an AutoCloseFD isn't allowed (who should get to close
+       it?).  But as an edge case, allow copying of closed
        AutoCloseFDs.  This is necessary due to tiresome reasons
        involving copy constructor use on default object values in STL
        containers (like when you do `map[value]' where value isn't in
@@ -652,7 +668,7 @@ void AutoCloseFD::close()
     if (fd != -1) {
         if (::close(fd) == -1)
             /* This should never happen. */
-            throw SysError("closing file descriptor");
+            throw SysError(format("closing file descriptor %1%") % fd);
         fd = -1;
     }
 }
@@ -721,8 +737,8 @@ AutoCloseDir::operator DIR *()
 void AutoCloseDir::close()
 {
     if (dir) {
-	closedir(dir);
-	dir = 0;
+        closedir(dir);
+        dir = 0;
     }
 }
 
@@ -760,8 +776,8 @@ Pid::operator pid_t()
 
 void Pid::kill()
 {
-    if (pid == -1) return;
-    
+    if (pid == -1 || pid == 0) return;
+
     printMsg(lvlError, format("killing process %1%") % pid);
 
     /* Send the requested signal to the child.  If it has its own
@@ -787,6 +803,7 @@ void Pid::kill()
 
 int Pid::wait(bool block)
 {
+    assert(pid != -1);
     while (1) {
         int status;
         int res = waitpid(pid, &status, block ? 0 : WNOHANG);
@@ -837,21 +854,29 @@ void killUser(uid_t uid)
             if (setuid(uid) == -1)
                 throw SysError("setting uid");
 
-	    while (true) {
-		if (kill(-1, SIGKILL) == 0) break;
-		if (errno == ESRCH) break; /* no more processes */
-		if (errno != EINTR)
-		    throw SysError(format("cannot kill processes for uid `%1%'") % uid);
-	    }
+            while (true) {
+#ifdef __APPLE__
+                /* OSX's kill syscall takes a third parameter that, among other
+                   things, determines if kill(-1, signo) affects the calling
+                   process. In the OSX libc, it's set to true, which means
+                   "follow POSIX", which we don't want here
+                 */
+                if (syscall(SYS_kill, -1, SIGKILL, false) == 0) break;
+#else
+                if (kill(-1, SIGKILL) == 0) break;
+#endif
+                if (errno == ESRCH) break; /* no more processes */
+                if (errno != EINTR)
+                    throw SysError(format("cannot kill processes for uid `%1%'") % uid);
+            }
 
         } catch (std::exception & e) {
-            std::cerr << format("killing processes belonging to uid `%1%': %2%")
-                % uid % e.what() << std::endl;
-            quickExit(1);
+            writeToStderr((format("killing processes belonging to uid `%1%': %2%\n") % uid % e.what()).str());
+            _exit(1);
         }
-        quickExit(0);
+        _exit(0);
     }
-    
+
     /* parent */
     int status = pid.wait(true);
     if (status != 0)
@@ -870,14 +895,21 @@ void killUser(uid_t uid)
 string runProgram(Path program, bool searchPath, const Strings & args)
 {
     checkInterrupt();
-    
+
+    std::vector<const char *> cargs; /* careful with c_str()! */
+    cargs.push_back(program.c_str());
+    for (Strings::const_iterator i = args.begin(); i != args.end(); ++i)
+        cargs.push_back(i->c_str());
+    cargs.push_back(0);
+
     /* Create a pipe. */
     Pipe pipe;
     pipe.create();
 
     /* Fork. */
     Pid pid;
-    pid = fork();
+    pid = maybeVfork();
+
     switch (pid) {
 
     case -1:
@@ -885,27 +917,19 @@ string runProgram(Path program, bool searchPath, const Strings & args)
 
     case 0: /* child */
         try {
-            pipe.readSide.close();
-
             if (dup2(pipe.writeSide, STDOUT_FILENO) == -1)
                 throw SysError("dupping stdout");
-
-            std::vector<const char *> cargs; /* careful with c_str()! */
-            cargs.push_back(program.c_str());
-            for (Strings::const_iterator i = args.begin(); i != args.end(); ++i)
-                cargs.push_back(i->c_str());
-            cargs.push_back(0);
 
             if (searchPath)
                 execvp(program.c_str(), (char * *) &cargs[0]);
             else
                 execv(program.c_str(), (char * *) &cargs[0]);
             throw SysError(format("executing `%1%'") % program);
-            
+
         } catch (std::exception & e) {
-            std::cerr << "error: " << e.what() << std::endl;
+            writeToStderr("error: " + string(e.what()) + "\n");
         }
-        quickExit(1);
+        _exit(1);
     }
 
     /* Parent. */
@@ -944,12 +968,6 @@ void closeOnExec(int fd)
 }
 
 
-void quickExit(int status)
-{
-    _exit(status);
-}
-
-
 void setuidCleanup()
 {
     /* Don't trust the environment. */
@@ -961,6 +979,13 @@ void setuidCleanup()
         if (fstat(fd, &st) == -1) abort();
     }
 }
+
+
+#if HAVE_VFORK
+pid_t (*maybeVfork)() = vfork;
+#else
+pid_t (*maybeVfork)() = fork;
+#endif
 
 
 //////////////////////////////////////////////////////////////////////
@@ -992,13 +1017,14 @@ template<class C> C tokenizeString(const string & s, const string & separators)
         string::size_type end = s.find_first_of(separators, pos + 1);
         if (end == string::npos) end = s.size();
         string token(s, pos, end - pos);
-        result.push_back(token);
+        result.insert(result.end(), token);
         pos = s.find_first_not_of(separators, end);
     }
     return result;
 }
 
 template Strings tokenizeString(const string & s, const string & separators);
+template StringSet tokenizeString(const string & s, const string & separators);
 template vector<string> tokenizeString(const string & s, const string & separators);
 
 
@@ -1006,6 +1032,17 @@ string concatStringsSep(const string & sep, const Strings & ss)
 {
     string s;
     foreach (Strings::const_iterator, i, ss) {
+        if (s.size() != 0) s += sep;
+        s += *i;
+    }
+    return s;
+}
+
+
+string concatStringsSep(const string & sep, const StringSet & ss)
+{
+    string s;
+    foreach (StringSet::const_iterator, i, ss) {
         if (s.size() != 0) s += sep;
         s += *i;
     }
@@ -1026,14 +1063,14 @@ string statusToString(int status)
         if (WIFEXITED(status))
             return (format("failed with exit code %1%") % WEXITSTATUS(status)).str();
         else if (WIFSIGNALED(status)) {
-	    int sig = WTERMSIG(status);
+            int sig = WTERMSIG(status);
 #if HAVE_STRSIGNAL
             const char * description = strsignal(sig);
             return (format("failed due to signal %1% (%2%)") % sig % description).str();
 #else
             return (format("failed due to signal %1%") % sig).str();
 #endif
-	}
+        }
         else
             return "died abnormally";
     } else return "succeeded";
@@ -1043,14 +1080,6 @@ string statusToString(int status)
 bool statusOk(int status)
 {
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
-}
-
-
-string int2String(int n)
-{
-    std::ostringstream str;
-    str << n;
-    return str.str();
 }
 
 
@@ -1125,5 +1154,5 @@ void ignoreException()
     }
 }
 
- 
+
 }

@@ -68,6 +68,8 @@ if test "$sys_name" = sunos; then
 fi
 
 
+CFLAGS=${CFLAGS:--g -O3 -Wall}
+CXXFLAGS=${CXXFLAGS:--g -O3 -Wall}
 AC_PROG_CC
 AC_PROG_CXX
 
@@ -123,6 +125,10 @@ AC_CHECK_HEADERS([sys/mount.h], [], [],
 # Check for lutimes, optionally used for changing the mtime of
 # symlinks.
 AC_CHECK_FUNCS([lutimes])
+
+
+# Check for sched_setaffinity.
+AC_CHECK_FUNCS([sched_setaffinity])
 
 
 # Check whether the store optimiser can optimise symlinks.
@@ -183,10 +189,10 @@ NEED_PROG(perl, perl)
 NEED_PROG(sed, sed)
 NEED_PROG(tar, tar)
 NEED_PROG(bzip2, bzip2)
+NEED_PROG(gzip, gzip)
 NEED_PROG(xz, xz)
 AC_PATH_PROG(dot, dot)
 AC_PATH_PROG(dblatex, dblatex)
-AC_PATH_PROG(gzip, gzip)
 AC_PATH_PROG(pv, pv, pv)
 
 

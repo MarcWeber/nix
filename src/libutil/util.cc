@@ -12,6 +12,10 @@
 #include <fcntl.h>
 #include <limits.h>
 
+#ifdef __APPLE__
+#include <sys/syscall.h>
+#endif
+
 #include "util.hh"
 
 
@@ -145,6 +149,15 @@ string baseNameOf(const Path & path)
     if (pos == string::npos)
         throw Error(format("invalid file name `%1%'") % path);
     return string(path, pos + 1);
+}
+
+
+bool isInDir(const Path & path, const Path & dir)
+{
+    return path[0] == '/'
+        && string(path, 0, dir.size()) == dir
+        && path.size() >= dir.size() + 2
+        && path[dir.size()] == '/';
 }
 
 
@@ -616,8 +629,8 @@ AutoCloseFD::AutoCloseFD(int fd)
 
 AutoCloseFD::AutoCloseFD(const AutoCloseFD & fd)
 {
-    /* Copying a AutoCloseFD isn't allowed (who should get to close
-       it?).  But as a edge case, allow copying of closed
+    /* Copying an AutoCloseFD isn't allowed (who should get to close
+       it?).  But as an edge case, allow copying of closed
        AutoCloseFDs.  This is necessary due to tiresome reasons
        involving copy constructor use on default object values in STL
        containers (like when you do `map[value]' where value isn't in
@@ -790,6 +803,7 @@ void Pid::kill()
 
 int Pid::wait(bool block)
 {
+    assert(pid != -1);
     while (1) {
         int status;
         int res = waitpid(pid, &status, block ? 0 : WNOHANG);
@@ -841,7 +855,16 @@ void killUser(uid_t uid)
                 throw SysError("setting uid");
 
             while (true) {
+#ifdef __APPLE__
+                /* OSX's kill syscall takes a third parameter that, among other
+                   things, determines if kill(-1, signo) affects the calling
+                   process. In the OSX libc, it's set to true, which means
+                   "follow POSIX", which we don't want here
+                 */
+                if (syscall(SYS_kill, -1, SIGKILL, false) == 0) break;
+#else
                 if (kill(-1, SIGKILL) == 0) break;
+#endif
                 if (errno == ESRCH) break; /* no more processes */
                 if (errno != EINTR)
                     throw SysError(format("cannot kill processes for uid `%1%'") % uid);
@@ -1057,14 +1080,6 @@ string statusToString(int status)
 bool statusOk(int status)
 {
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
-}
-
-
-string int2String(int n)
-{
-    std::ostringstream str;
-    str << n;
-    return str.str();
 }
 
 

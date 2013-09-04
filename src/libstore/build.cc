@@ -7,6 +7,7 @@
 #include "local-store.hh"
 #include "util.hh"
 #include "archive.hh"
+#include "affinity.hh"
 
 #include <map>
 #include <sstream>
@@ -20,6 +21,7 @@
 #include <sys/wait.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/utsname.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
@@ -172,7 +174,7 @@ public:
     /* Cancel the goal.  It should wake up its waiters, get rid of any
        running child processes that are being monitored by the worker
        (important!), etc. */
-    virtual void cancel() = 0;
+    virtual void cancel(bool timeout) = 0;
 
 protected:
     void amDone(ExitCode result);
@@ -186,9 +188,10 @@ struct Child
 {
     WeakGoalPtr goal;
     set<int> fds;
-    bool monitorForSilence;
+    bool respectTimeouts;
     bool inBuildSlot;
     time_t lastOutput; /* time we last got output on stdout/stderr */
+    time_t timeStarted;
 };
 
 typedef map<pid_t, Child> Children;
@@ -232,9 +235,6 @@ private:
     /* Last time the goals in `waitingForAWhile' where woken up. */
     time_t lastWokenUp;
 
-    /* Last time `waitForInput' was last called.  */
-    time_t lastWait;
-
 public:
 
     /* Set if at least one derivation had a BuildError (i.e. permanent
@@ -266,7 +266,7 @@ public:
     /* Registers a running child process.  `inBuildSlot' means that
        the process counts towards the jobs limit. */
     void childStarted(GoalPtr goal, pid_t pid,
-        const set<int> & fds, bool inBuildSlot, bool monitorForSilence);
+        const set<int> & fds, bool inBuildSlot, bool respectTimeouts);
 
     /* Unregisters a running child process.  `wakeSleepers' should be
        false if there is no sense in waking up goals that are sleeping
@@ -368,6 +368,8 @@ void Goal::trace(const format & f)
 /* Common initialisation performed in child processes. */
 static void commonChildInit(Pipe & logPipe)
 {
+    restoreAffinity();
+
     /* Put the child in a separate session (and thus a separate
        process group) so that it has no controlling terminal (meaning
        that e.g. ssh cannot open /dev/tty) and it doesn't receive
@@ -570,6 +572,7 @@ static void runSetuidHelper(const string & command,
             args.push_back(0);
 
             restoreSIGPIPE();
+            restoreAffinity();
 
             execve(program.c_str(), (char * *) &args[0], 0);
             throw SysError(format("executing `%1%'") % program);
@@ -790,6 +793,12 @@ private:
     /* Outputs that are already valid. */
     PathSet validPaths;
 
+    /* Outputs that are corrupt or not valid. */
+    PathSet missingPaths;
+
+    /* Paths that have been subject to hash rewriting. */
+    PathSet rewrittenPaths;
+
     /* User selected for running the builder. */
     UserLock buildUser;
 
@@ -803,6 +812,9 @@ private:
     FILE * fLogFile;
     BZFILE * bzLogFile;
     AutoCloseFD fdLogFile;
+
+    /* Number of bytes received from the builder's stdout/stderr. */
+    unsigned long logSize;
 
     /* Pipe for the builder's standard output/error. */
     Pipe builderOut;
@@ -842,6 +854,11 @@ private:
     bool repair;
     map<Path, Path> redirectedBadOutputs;
 
+    /* Set of inodes seen during calls to canonicalisePathMetaData()
+       for this build's outputs.  This needs to be shared between
+       outputs to allow hard links between outputs. */
+    InodesSeen inodesSeen;
+
     /* Magic exit code denoting that setting up the child environment
        failed.  (It's possible that the child actually returns the
        exit code, but ah well.) */
@@ -851,7 +868,7 @@ public:
     DerivationGoal(const Path & drvPath, const StringSet & wantedOutputs, Worker & worker, bool repair = false);
     ~DerivationGoal();
 
-    void cancel();
+    void cancel(bool timeout);
 
     void work();
 
@@ -977,8 +994,10 @@ void DerivationGoal::killChild()
 }
 
 
-void DerivationGoal::cancel()
+void DerivationGoal::cancel(bool timeout)
 {
+    if (settings.printBuildTrace && timeout)
+        printMsg(lvlError, format("@ build-failed %1% - timeout") % drvPath);
     killChild();
     amDone(ecFailed);
 }
@@ -1063,7 +1082,7 @@ void DerivationGoal::haveDerivation()
     /* We are first going to try to create the invalid output paths
        through substitutes.  If that doesn't work, we'll build
        them. */
-    if (settings.useSubstitutes)
+    if (settings.useSubstitutes && !willBuildLocally(drv))
         foreach (PathSet::iterator, i, invalidOutputs)
             addWaitee(worker.makeSubstitutionGoal(*i, repair));
 
@@ -1254,6 +1273,13 @@ PathSet outputPaths(const DerivationOutputs & outputs)
 }
 
 
+static string get(const StringPairs & map, const string & key)
+{
+    StringPairs::const_iterator i = map.find(key);
+    return i == map.end() ? (string) "" : i->second;
+}
+
+
 static bool canBuildLocally(const string & platform)
 {
     return platform == settings.thisSystem
@@ -1261,6 +1287,12 @@ static bool canBuildLocally(const string & platform)
         || (platform == "i686-linux" && settings.thisSystem == "x86_64-linux")
 #endif
         ;
+}
+
+
+bool willBuildLocally(const Derivation & drv)
+{
+    return get(drv.env, "preferLocalBuild") == "1" && canBuildLocally(drv.platform);
 }
 
 
@@ -1307,6 +1339,9 @@ void DerivationGoal::tryToBuild()
         return;
     }
 
+    missingPaths = outputPaths(drv.outputs);
+    foreach (PathSet::iterator, i, validPaths) missingPaths.erase(*i);
+
     /* If any of the outputs already exist but are not valid, delete
        them. */
     foreach (DerivationOutputs::iterator, i, drv.outputs) {
@@ -1325,11 +1360,10 @@ void DerivationGoal::tryToBuild()
 
     /* Don't do a remote build if the derivation has the attribute
        `preferLocalBuild' set. */
-    bool preferLocalBuild =
-        drv.env["preferLocalBuild"] == "1" && canBuildLocally(drv.platform);
+    bool buildLocally = willBuildLocally(drv);
 
     /* Is the build hook willing to accept this job? */
-    if (!preferLocalBuild) {
+    if (!buildLocally) {
         switch (tryBuildHook()) {
             case rpAccept:
                 /* Yes, it has started doing so.  Wait until we get
@@ -1352,7 +1386,7 @@ void DerivationGoal::tryToBuild()
        derivation prefers to be done locally, do it even if
        maxBuildJobs is 0. */
     unsigned int curBuilds = worker.getNrLocalBuilds();
-    if (curBuilds >= settings.maxBuildJobs && !(preferLocalBuild && curBuilds == 0)) {
+    if (curBuilds >= settings.maxBuildJobs && !(buildLocally && curBuilds == 0)) {
         worker.waitForBuildSlot(shared_from_this());
         outputLocks.unlock();
         return;
@@ -1368,8 +1402,8 @@ void DerivationGoal::tryToBuild()
         outputLocks.unlock();
         buildUser.release();
         if (settings.printBuildTrace)
-            printMsg(lvlError, format("@ build-failed %1% %2% %3% %4%")
-                % drvPath % drv.outputs["out"].path % 0 % e.msg());
+            printMsg(lvlError, format("@ build-failed %1% - %2% %3%")
+                % drvPath % 0 % e.msg());
         worker.permanentFailure = true;
         amDone(ecFailed);
         return;
@@ -1444,8 +1478,8 @@ void DerivationGoal::buildDone()
         /* Some cleanup per path.  We do this here and not in
            computeClosure() for convenience when the build has
            failed. */
-        foreach (DerivationOutputs::iterator, i, drv.outputs) {
-            Path path = i->second.path;
+        foreach (PathSet::iterator, i, missingPaths) {
+            Path path = *i;
 
             /* If the output was already valid, just skip (discard) it. */
             if (validPaths.find(path) != validPaths.end()) continue;
@@ -1482,6 +1516,12 @@ void DerivationGoal::buildDone()
             /* Apply hash rewriting if necessary. */
             if (!rewritesFromTmp.empty()) {
                 printMsg(lvlError, format("warning: rewriting hashes in `%1%'; cross fingers") % path);
+
+                /* Canonicalise first.  This ensures that the path
+                   we're rewriting doesn't contain a hard link to
+                   /etc/shadow or something like that. */
+                canonicalisePathMetaData(path, buildUser.enabled() ? buildUser.getUID() : -1, inodesSeen);
+
                 /* FIXME: this is in-memory. */
                 StringSink sink;
                 dumpPath(path, sink);
@@ -1489,6 +1529,8 @@ void DerivationGoal::buildDone()
                 sink.s = rewriteHashes(sink.s, rewritesFromTmp);
                 StringSource source(sink.s);
                 restorePath(path, source);
+
+                rewrittenPaths.insert(path);
             }
 
             /* Gain ownership of the build result using the setuid
@@ -1541,11 +1583,11 @@ void DerivationGoal::buildDone()
 
         if (settings.printBuildTrace) {
             if (hook && hookError)
-                printMsg(lvlError, format("@ hook-failed %1% %2% %3% %4%")
-                    % drvPath % drv.outputs["out"].path % status % e.msg());
+                printMsg(lvlError, format("@ hook-failed %1% - %2% %3%")
+                    % drvPath % status % e.msg());
             else
-                printMsg(lvlError, format("@ build-failed %1% %2% %3% %4%")
-                    % drvPath % drv.outputs["out"].path % 1 % e.msg());
+                printMsg(lvlError, format("@ build-failed %1% - %2% %3%")
+                    % drvPath % 1 % e.msg());
         }
 
         /* Register the outputs of this build as "failed" so we won't
@@ -1567,10 +1609,8 @@ void DerivationGoal::buildDone()
     /* Release the build user, if applicable. */
     buildUser.release();
 
-    if (settings.printBuildTrace) {
-        printMsg(lvlError, format("@ build-succeeded %1% %2%")
-            % drvPath % drv.outputs["out"].path);
-    }
+    if (settings.printBuildTrace)
+        printMsg(lvlError, format("@ build-succeeded %1% -") % drvPath);
 
     amDone(ecSuccess);
 }
@@ -1586,7 +1626,7 @@ HookReply DerivationGoal::tryBuildHook()
     /* Tell the hook about system features (beyond the system type)
        required from the build machine.  (The hook could parse the
        drv file itself, but this is easier.) */
-    Strings features = tokenizeString<Strings>(drv.env["requiredSystemFeatures"]);
+    Strings features = tokenizeString<Strings>(get(drv.env, "requiredSystemFeatures"));
     foreach (Strings::iterator, i, features) checkStoreName(*i); /* !!! abuse */
 
     /* Send the request to the hook. */
@@ -1651,8 +1691,8 @@ HookReply DerivationGoal::tryBuildHook()
     worker.childStarted(shared_from_this(), hook->pid, fds, false, false);
 
     if (settings.printBuildTrace)
-        printMsg(lvlError, format("@ build-started %1% %2% %3% %4%")
-            % drvPath % drv.outputs["out"].path % drv.platform % logFile);
+        printMsg(lvlError, format("@ build-started %1% - %2% %3%")
+            % drvPath % drv.platform % logFile);
 
     return rpAccept;
 }
@@ -1674,9 +1714,7 @@ int childEntry(void * arg)
 
 void DerivationGoal::startBuilder()
 {
-    PathSet missing = outputPaths(drv.outputs);
-    foreach (PathSet::iterator, i, validPaths) missing.erase(*i);
-    startNest(nest, lvlInfo, format("building path(s) %1%") % showPaths(missing));
+    startNest(nest, lvlInfo, format(repair ? "repairing path(s) %1%" : "building path(s) %1%") % showPaths(missingPaths));
 
     /* Right platform? */
     if (!canBuildLocally(drv.platform))
@@ -1746,7 +1784,7 @@ void DerivationGoal::startBuilder()
        fixed-output derivations is by definition pure (since we
        already know the cryptographic hash of the output). */
     if (fixedOutput) {
-        Strings varNames = tokenizeString<Strings>(drv.env["impureEnvVars"]);
+        Strings varNames = tokenizeString<Strings>(get(drv.env, "impureEnvVars"));
         foreach (Strings::iterator, i, varNames) env[*i] = getEnv(*i);
     }
 
@@ -1757,7 +1795,7 @@ void DerivationGoal::startBuilder()
        temporary build directory.  The text files have the format used
        by `nix-store --register-validity'.  However, the deriver
        fields are left empty. */
-    string s = drv.env["exportReferencesGraph"];
+    string s = get(drv.env, "exportReferencesGraph");
     Strings ss = tokenizeString<Strings>(s);
     if (ss.size() % 2 != 0)
         throw BuildError(format("odd number of tokens in `exportReferencesGraph': `%1%'") % s);
@@ -1843,7 +1881,7 @@ void DerivationGoal::startBuilder()
     if (fixedOutput) useChroot = false;
 
     /* Hack to allow derivations to disable chroot builds. */
-    if (drv.env["__noChroot"] == "1") useChroot = false;
+    if (get(drv.env, "__noChroot") == "1") useChroot = false;
 
     if (useChroot) {
 #if CHROOT_ENABLED
@@ -1967,7 +2005,7 @@ void DerivationGoal::startBuilder()
         /* If we're repairing, then we don't want to delete the
            corrupt outputs in advance.  So rewrite them as well. */
         if (repair)
-            foreach (PathSet::iterator, i, missing)
+            foreach (PathSet::iterator, i, missingPaths)
                 if (worker.store.isValidPath(*i) && pathExists(*i))
                     redirectedBadOutputs[*i] = addHashRewrite(*i);
     }
@@ -2033,8 +2071,8 @@ void DerivationGoal::startBuilder()
         singleton<set<int> >(builderOut.readSide), true, true);
 
     if (settings.printBuildTrace) {
-        printMsg(lvlError, format("@ build-started %1% %2% %3% %4%")
-            % drvPath % drv.outputs["out"].path % drv.platform % logFile);
+        printMsg(lvlError, format("@ build-started %1% - %2% %3%")
+            % drvPath % drv.platform % logFile);
     }
 }
 
@@ -2088,11 +2126,19 @@ void DerivationGoal::initChild()
                filesystem that we want in the chroot
                environment. */
             foreach (DirsInChroot::iterator, i, dirsInChroot) {
+                struct stat st;
                 Path source = i->second;
                 Path target = chrootRootDir + i->first;
                 if (source == "/proc") continue; // backwards compatibility
                 debug(format("bind mounting `%1%' to `%2%'") % source % target);
-                createDirs(target);
+                if (stat(source.c_str(), &st) == -1)
+                    throw SysError(format("getting attributes of path `%1%'") % source);
+                if (S_ISDIR(st.st_mode))
+                    createDirs(target);
+                else {
+                    createDirs(dirOf(target));
+                    writeFile(target, "");
+                }
                 if (mount(source.c_str(), target.c_str(), "", MS_BIND, 0) == -1)
                     throw SysError(format("bind mount from `%1%' to `%2%' failed") % source % target);
             }
@@ -2130,7 +2176,11 @@ void DerivationGoal::initChild()
 #ifdef CAN_DO_LINUX32_BUILDS
         /* Change the personality to 32-bit if we're doing an
            i686-linux build on an x86_64-linux machine. */
-        if (drv.platform == "i686-linux" && settings.thisSystem == "x86_64-linux") {
+        struct utsname utsbuf;
+        uname(&utsbuf);
+        if (drv.platform == "i686-linux" &&
+            (settings.thisSystem == "x86_64-linux" ||
+             (!strcmp(utsbuf.sysname, "Linux") && !strcmp(utsbuf.machine, "x86_64")))) {
             if (personality(0x0008 | 0x8000000 /* == PER_LINUX32_3GB */) == -1)
                 throw SysError("cannot set i686-linux personality");
         }
@@ -2252,6 +2302,8 @@ void DerivationGoal::computeClosure()
        output paths read-only. */
     foreach (DerivationOutputs::iterator, i, drv.outputs) {
         Path path = i->second.path;
+        if (missingPaths.find(path) == missingPaths.end()) continue;
+
         if (!pathExists(path)) {
             throw BuildError(
                 format("builder for `%1%' failed to produce output path `%2%'")
@@ -2290,8 +2342,10 @@ void DerivationGoal::computeClosure()
                     % path % i->second.hashAlgo % printHash16or32(h) % printHash16or32(h2));
         }
 
-        /* Get rid of all weird permissions. */
-        canonicalisePathMetaData(path, buildUser.enabled() ? buildUser.getUID() : -1);
+        /* Get rid of all weird permissions.  This also checks that
+           all files are owned by the build user, if applicable. */
+        canonicalisePathMetaData(path,
+            buildUser.enabled() && rewrittenPaths.find(path) == rewrittenPaths.end() ? buildUser.getUID() : -1, inodesSeen);
 
         /* For this output path, find the references to other paths
            contained in it.  Compute the SHA-256 NAR hash at the same
@@ -2318,7 +2372,7 @@ void DerivationGoal::computeClosure()
            refer to), check that all references are in that list.  !!!
            allowedReferences should really be per-output. */
         if (drv.env.find("allowedReferences") != drv.env.end()) {
-            PathSet allowed = parseReferenceSpecifiers(drv, drv.env["allowedReferences"]);
+            PathSet allowed = parseReferenceSpecifiers(drv, get(drv.env, "allowedReferences"));
             foreach (PathSet::iterator, i, references)
                 if (allowed.find(*i) == allowed.end())
                     throw BuildError(format("output is not allowed to refer to path `%1%'") % *i);
@@ -2333,12 +2387,12 @@ void DerivationGoal::computeClosure()
        paths referenced by each of them.  If there are cycles in the
        outputs, this will fail. */
     ValidPathInfos infos;
-    foreach (DerivationOutputs::iterator, i, drv.outputs) {
+    foreach (PathSet::iterator, i, missingPaths) {
         ValidPathInfo info;
-        info.path = i->second.path;
-        info.hash = contentHashes[i->second.path].first;
-        info.narSize = contentHashes[i->second.path].second;
-        info.references = allReferences[i->second.path];
+        info.path = *i;
+        info.hash = contentHashes[*i].first;
+        info.narSize = contentHashes[*i].second;
+        info.references = allReferences[*i];
         info.deriver = drvPath;
         infos.push_back(info);
     }
@@ -2351,6 +2405,8 @@ string drvsLogDir = "drvs";
 
 Path DerivationGoal::openLogFile()
 {
+    logSize = 0;
+
     if (!settings.keepLog) return "";
 
     string baseName = baseNameOf(drvPath);
@@ -2426,6 +2482,14 @@ void DerivationGoal::handleChildOutput(int fd, const string & data)
     if ((hook && fd == hook->builderOut.readSide) ||
         (!hook && fd == builderOut.readSide))
     {
+        logSize += data.size();
+        if (settings.maxLogSize && logSize > settings.maxLogSize) {
+            printMsg(lvlError,
+                format("%1% killed after writing more than %2% bytes of log output")
+                % getName() % settings.maxLogSize);
+            cancel(true); // not really a timeout, but close enough
+            return;
+        }
         if (verbosity >= settings.buildVerbosity)
             writeToStderr(data);
         if (bzLogFile) {
@@ -2470,7 +2534,7 @@ bool DerivationGoal::pathFailed(const Path & path)
     printMsg(lvlError, format("builder for `%1%' failed previously (cached)") % path);
 
     if (settings.printBuildTrace)
-        printMsg(lvlError, format("@ build-failed %1% %2% cached") % drvPath % path);
+        printMsg(lvlError, format("@ build-failed %1% - cached") % drvPath);
 
     worker.permanentFailure = true;
     amDone(ecFailed);
@@ -2541,7 +2605,7 @@ public:
     SubstitutionGoal(const Path & storePath, Worker & worker, bool repair = false);
     ~SubstitutionGoal();
 
-    void cancel();
+    void cancel(bool timeout);
 
     void work();
 
@@ -2582,8 +2646,10 @@ SubstitutionGoal::~SubstitutionGoal()
 }
 
 
-void SubstitutionGoal::cancel()
+void SubstitutionGoal::cancel(bool timeout)
 {
+    if (settings.printBuildTrace && timeout)
+        printMsg(lvlError, format("@ substituter-failed %1% timeout") % storePath);
     if (pid != -1) {
         pid_t savedPid = pid;
         pid.kill();
@@ -2774,10 +2840,8 @@ void SubstitutionGoal::tryToRun()
 
     state = &SubstitutionGoal::finished;
 
-    if (settings.printBuildTrace) {
-        printMsg(lvlError, format("@ substituter-started %1% %2%")
-            % storePath % sub);
-    }
+    if (settings.printBuildTrace)
+        printMsg(lvlError, format("@ substituter-started %1% %2%") % storePath % sub);
 }
 
 
@@ -2864,9 +2928,8 @@ void SubstitutionGoal::finished()
     printMsg(lvlChatty,
         format("substitution of path `%1%' succeeded") % storePath);
 
-    if (settings.printBuildTrace) {
+    if (settings.printBuildTrace)
         printMsg(lvlError, format("@ substituter-succeeded %1%") % storePath);
-    }
 
     amDone(ecSuccess);
 }
@@ -2994,14 +3057,14 @@ unsigned Worker::getNrLocalBuilds()
 
 void Worker::childStarted(GoalPtr goal,
     pid_t pid, const set<int> & fds, bool inBuildSlot,
-    bool monitorForSilence)
+    bool respectTimeouts)
 {
     Child child;
     child.goal = goal;
     child.fds = fds;
-    child.lastOutput = time(0);
+    child.timeStarted = child.lastOutput = time(0);
     child.inBuildSlot = inBuildSlot;
-    child.monitorForSilence = monitorForSilence;
+    child.respectTimeouts = respectTimeouts;
     children[pid] = child;
     if (inBuildSlot) nrLocalBuilds++;
 }
@@ -3117,31 +3180,22 @@ void Worker::waitForInput()
     timeout.tv_usec = 0;
     time_t before = time(0);
 
-    /* If a global timeout has been set, sleep until it's done.  */
-    if (settings.buildTimeout != 0) {
-        useTimeout = true;
-        if (lastWait == 0 || lastWait > before) lastWait = before;
-        timeout.tv_sec = std::max((time_t) 0, lastWait + settings.buildTimeout - before);
+    /* If we're monitoring for silence on stdout/stderr, or if there
+       is a build timeout, then wait for input until the first
+       deadline for any child. */
+    assert(sizeof(time_t) >= sizeof(long));
+    time_t nearest = LONG_MAX; // nearest deadline
+    foreach (Children::iterator, i, children) {
+        if (!i->second.respectTimeouts) continue;
+        if (settings.maxSilentTime != 0)
+            nearest = std::min(nearest, i->second.lastOutput + settings.maxSilentTime);
+        if (settings.buildTimeout != 0)
+            nearest = std::min(nearest, i->second.timeStarted + settings.buildTimeout);
     }
-
-    /* If we're monitoring for silence on stdout/stderr, sleep until
-       the first deadline for any child. */
-    if (settings.maxSilentTime != 0) {
-        time_t oldest = 0;
-        foreach (Children::iterator, i, children) {
-            if (i->second.monitorForSilence) {
-                oldest = oldest == 0 || i->second.lastOutput < oldest
-                    ? i->second.lastOutput : oldest;
-            }
-        }
-        if (oldest) {
-            time_t silenceTimeout = std::max((time_t) 0, oldest + settings.maxSilentTime - before);
-            timeout.tv_sec = useTimeout
-                ? std::min(silenceTimeout, timeout.tv_sec)
-                : silenceTimeout;
-            useTimeout = true;
-            printMsg(lvlVomit, format("sleeping %1% seconds") % timeout.tv_sec);
-        }
+    if (nearest != LONG_MAX) {
+        timeout.tv_sec = std::max((time_t) 1, nearest - before);
+        useTimeout = true;
+        printMsg(lvlVomit, format("sleeping %1% seconds") % timeout.tv_sec);
     }
 
     /* If we are polling goals that are waiting for a lock, then wake
@@ -3151,7 +3205,7 @@ void Worker::waitForInput()
         if (lastWokenUp == 0)
             printMsg(lvlError, "waiting for locks or build slots...");
         if (lastWokenUp == 0 || lastWokenUp > before) lastWokenUp = before;
-        timeout.tv_sec = std::max((time_t) 0, (time_t) (lastWokenUp + settings.pollInterval - before));
+        timeout.tv_sec = std::max((time_t) 1, (time_t) (lastWokenUp + settings.pollInterval - before));
     } else lastWokenUp = 0;
 
     using namespace std;
@@ -3174,9 +3228,6 @@ void Worker::waitForInput()
     }
 
     time_t after = time(0);
-
-    /* Keep track of when we were last called.  */
-    lastWait = after;
 
     /* Process all available file descriptors. */
 
@@ -3218,22 +3269,23 @@ void Worker::waitForInput()
         }
 
         if (settings.maxSilentTime != 0 &&
-            j->second.monitorForSilence &&
+            j->second.respectTimeouts &&
             after - j->second.lastOutput >= (time_t) settings.maxSilentTime)
         {
             printMsg(lvlError,
                 format("%1% timed out after %2% seconds of silence")
                 % goal->getName() % settings.maxSilentTime);
-            goal->cancel();
+            goal->cancel(true);
         }
 
         if (settings.buildTimeout != 0 &&
-            after - before >= (time_t) settings.buildTimeout)
+            j->second.respectTimeouts &&
+            after - j->second.timeStarted >= (time_t) settings.buildTimeout)
         {
             printMsg(lvlError,
-                format("%1% timed out after %2% seconds of activity")
+                format("%1% timed out after %2% seconds")
                 % goal->getName() % settings.buildTimeout);
-            goal->cancel();
+            goal->cancel(true);
         }
     }
 

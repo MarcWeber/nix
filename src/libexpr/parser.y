@@ -104,6 +104,7 @@ static void addAttr(ExprAttrs * attrs, AttrPath & attrPath,
             }
         }
     }
+    e->setName(attrPath.back());
 }
 
 
@@ -237,7 +238,7 @@ void yyerror(YYLTYPE * loc, yyscan_t scanner, ParseData * data, const char * err
   nix::ExprAttrs * attrs;
   nix::Formals * formals;
   nix::Formal * formal;
-  int n;
+  nix::NixInt n;
   char * id; // !!! -> Symbol
   char * path;
   char * uri;
@@ -268,12 +269,15 @@ void yyerror(YYLTYPE * loc, yyscan_t scanner, ParseData * data, const char * err
 %left OR
 %left AND
 %nonassoc EQ NEQ
+%left '<' '>' LEQ GEQ
 %right UPDATE
-%left NEG
-%left '+'
+%left NOT
+%left '+' '-'
+%left '*' '/'
 %right CONCAT
 %nonassoc '?'
 %nonassoc '~'
+%nonassoc NEGATE
 
 %%
 
@@ -305,9 +309,14 @@ expr_if
   ;
 
 expr_op
-  : '!' expr_op %prec NEG { $$ = new ExprOpNot($2); }
+  : '!' expr_op %prec NOT { $$ = new ExprOpNot($2); }
+  | '-' expr_op %prec NEGATE { $$ = new ExprApp(new ExprApp(new ExprVar(data->symbols.create("__sub")), new ExprInt(0)), $2); }
   | expr_op EQ expr_op { $$ = new ExprOpEq($1, $3); }
   | expr_op NEQ expr_op { $$ = new ExprOpNEq($1, $3); }
+  | expr_op '<' expr_op { $$ = new ExprApp(new ExprApp(new ExprVar(data->symbols.create("__lessThan")), $1), $3); }
+  | expr_op LEQ expr_op { $$ = new ExprOpNot(new ExprApp(new ExprApp(new ExprVar(data->symbols.create("__lessThan")), $3), $1)); }
+  | expr_op '>' expr_op { $$ = new ExprApp(new ExprApp(new ExprVar(data->symbols.create("__lessThan")), $3), $1); }
+  | expr_op GEQ expr_op { $$ = new ExprOpNot(new ExprApp(new ExprApp(new ExprVar(data->symbols.create("__lessThan")), $1), $3)); }
   | expr_op AND expr_op { $$ = new ExprOpAnd($1, $3); }
   | expr_op OR expr_op { $$ = new ExprOpOr($1, $3); }
   | expr_op IMPL expr_op { $$ = new ExprOpImpl($1, $3); }
@@ -319,6 +328,9 @@ expr_op
       l->push_back($3);
       $$ = new ExprConcatStrings(false, l);
     }
+  | expr_op '-' expr_op { $$ = new ExprApp(new ExprApp(new ExprVar(data->symbols.create("__sub")), $1), $3); }
+  | expr_op '*' expr_op { $$ = new ExprApp(new ExprApp(new ExprVar(data->symbols.create("__mul")), $1), $3); }
+  | expr_op '/' expr_op { $$ = new ExprApp(new ExprApp(new ExprVar(data->symbols.create("__div")), $1), $3); }
   | expr_op CONCAT expr_op { $$ = new ExprOpConcatLists($1, $3); }
   | expr_app
   ;
@@ -401,7 +413,7 @@ binds
           if ($$->attrs.find(*i) != $$->attrs.end())
               dupAttr(*i, makeCurPos(@3, data), $$->attrs[*i].pos);
           Pos pos = makeCurPos(@3, data);
-          $$->attrs[*i] = ExprAttrs::AttrDef(*i, pos);
+          $$->attrs[*i] = ExprAttrs::AttrDef(new ExprVar(*i), pos, true);
       }
     }
   | binds INHERIT '(' expr ')' attrs ';'

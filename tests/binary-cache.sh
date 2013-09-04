@@ -5,7 +5,7 @@ clearManifests
 
 # Create the binary cache.
 cacheDir=$TEST_ROOT/binary-cache
-rm -rf $cacheDir
+rm -rf "$cacheDir"
 
 outPath=$(nix-build dependencies.nix --no-out-link)
 
@@ -16,6 +16,8 @@ nix-push --dest $cacheDir $outPath
 # support installation.
 clearStore
 rm -f $NIX_STATE_DIR/binary-cache*
+
+export _NIX_CACHE_FILE_URLS=1
 
 nix-env --option binary-caches "file://$cacheDir" -f dependencies.nix -qas \* | grep -- "---"
 
@@ -36,6 +38,20 @@ nix-store --option binary-caches "file://$cacheDir" -r $outPath
 
 nix-store --check-validity $outPath
 nix-store -qR $outPath | grep input-2
+
+
+# Test whether fallback works if we have cached info but the
+# corresponding NAR has disappeared.
+clearStore
+
+nix-build --option binary-caches "file://$cacheDir" dependencies.nix --dry-run # get info
+
+mkdir $cacheDir/tmp
+mv $cacheDir/*.nar* $cacheDir/tmp/
+
+NIX_DEBUG_SUBST=1 nix-build --option binary-caches "file://$cacheDir" dependencies.nix -o $TEST_ROOT/result --fallback
+
+mv $cacheDir/tmp/* $cacheDir/
 
 
 # Test whether building works if the binary cache contains an

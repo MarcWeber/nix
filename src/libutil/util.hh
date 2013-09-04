@@ -45,6 +45,10 @@ Path dirOf(const Path & path);
    following the final `/'. */
 string baseNameOf(const Path & path);
 
+/* Check whether a given path is a descendant of the given
+   directory. */
+bool isInDir(const Path & path, const Path & dir);
+
 /* Get status of `path'. */
 struct stat lstat(const Path & path);
 
@@ -315,7 +319,12 @@ template<class N> bool string2Int(const string & s, N & n)
     return str && str.get() == EOF;
 }
 
-string int2String(int n);
+template<class N> string int2String(N n)
+{
+    std::ostringstream str;
+    str << n;
+    return str.str();
+}
 
 
 /* Return true iff `s' ends in `suffix'. */

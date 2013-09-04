@@ -3,23 +3,27 @@
 use strict;
 use Nix::Config;
 use Nix::Store;
+use Nix::Utils;
 use File::Temp qw(tempdir);
 
 
 my $dryRun = 0;
 my $verbose = 0;
-my $runEnv = 0;
+my $runEnv = $0 =~ /nix-shell$/;
+my $pure = 0;
 
 my @instArgs = ();
 my @buildArgs = ();
 my @exprs = ();
 
 my $shell = $ENV{SHELL} || "/bin/sh";
-my $envCommand = "p=\$PATH; source \$stdenv/setup; PATH=\$PATH:\$p; exec $shell";
+my $envCommand = ""; # interactive shell
 my @envExclude = ();
 
+my $myName = $runEnv ? "nix-shell" : "nix-build";
 
-my $tmpDir = tempdir("nix-build.XXXXXX", CLEANUP => 1, TMPDIR => 1)
+
+my $tmpDir = tempdir("$myName.XXXXXX", CLEANUP => 1, TMPDIR => 1)
     or die "cannot create a temporary directory";
 
 my $outLink = "./result";
@@ -33,11 +37,11 @@ for (my $n = 0; $n < scalar @ARGV; $n++) {
     my $arg = $ARGV[$n];
 
     if ($arg eq "--help") {
-        exec "man nix-build" or die;
+        exec "man $myName" or die;
     }
 
     elsif ($arg eq "--version") {
-        print "nix-build (Nix) $Nix::Config::version\n";
+        print "$myName (Nix) $Nix::Config::version\n";
         exit 0;
     }
 
@@ -87,7 +91,7 @@ for (my $n = 0; $n < scalar @ARGV; $n++) {
         $n += 2;
     }
 
-    elsif ($arg eq "--max-jobs" or $arg eq "-j" or $arg eq "--max-silent-time" or $arg eq "--log-type" or $arg eq "--cores") {
+    elsif ($arg eq "--max-jobs" or $arg eq "-j" or $arg eq "--max-silent-time" or $arg eq "--log-type" or $arg eq "--cores" or $arg eq "--timeout") {
         $n++;
         die "$0: `$arg' requires an argument\n" unless $n < scalar @ARGV;
         push @buildArgs, ($arg, $ARGV[$n]);
@@ -117,20 +121,24 @@ for (my $n = 0; $n < scalar @ARGV; $n++) {
         push @instArgs, $arg;
     }
 
-    elsif ($arg eq "--run-env") {
+    elsif ($arg eq "--run-env") { # obsolete
         $runEnv = 1;
     }
 
     elsif ($arg eq "--command") {
         $n++;
         die "$0: `$arg' requires an argument\n" unless $n < scalar @ARGV;
-        $envCommand = $ARGV[$n];
+        $envCommand = "$ARGV[$n]\nexit $!";
     }
 
     elsif ($arg eq "--exclude") {
         $n++;
         die "$0: `$arg' requires an argument\n" unless $n < scalar @ARGV;
         push @envExclude, $ARGV[$n];
+    }
+
+    elsif ($arg eq "--pure") {
+        $pure = 1;
     }
 
     elsif (substr($arg, 0, 1) eq "-") {
@@ -158,7 +166,7 @@ foreach my $expr (@exprs) {
     }
 
     if ($runEnv) {
-        die "$0: ‘--run-env’ requires a single derivation\n" if scalar @drvPaths != 1;
+        die "$0: a single derivation is required\n" if scalar @drvPaths != 1;
         my $drvPath = readlink $drvPaths[0] or die "cannot read symlink `$drvPaths[0]'";
         my $drv = derivationFromPath($drvPath);
 
@@ -168,16 +176,37 @@ foreach my $expr (@exprs) {
             or die "$0: failed to build all dependencies\n";
 
         # Set the environment.
-        $ENV{'NIX_BUILD_TOP'} = $ENV{'TMPDIR'} || "/tmp";
-        foreach (keys %{$drv->{env}}) {
-            $ENV{$_} = $drv->{env}->{$_};
+        if ($pure) {
+            foreach my $name (keys %ENV) {
+                next if $name eq "HOME" || $name eq "USER" || $name eq "LOGNAME" || $name eq "DISPLAY" || $name eq "PATH";
+                delete $ENV{$name};
+            }
+            # NixOS hack: prevent /etc/bashrc from sourcing /etc/profile.
+            $ENV{'__ETC_PROFILE_SOURCED'} = 1;
         }
+        $ENV{'NIX_BUILD_TOP'} = $ENV{'TMPDIR'} = $ENV{'TEMPDIR'} = $ENV{'TMP'} = $ENV{'TEMP'} = $ENV{'TMPDIR'} // "/tmp";
+        $ENV{'NIX_STORE'} = $Nix::Config::storeDir;
+        $ENV{$_} = $drv->{env}->{$_} foreach keys %{$drv->{env}};
+
+        $ENV{'IN_NIX_SHELL'} = 1;
 
         # Run a shell using the derivation's environment.  For
         # convenience, source $stdenv/setup to setup additional
-        # environment variables.  Also don't lose the current $PATH
-        # directories.
-        exec($ENV{SHELL}, "-c", $envCommand);
+        # environment variables and shell functions.  Also don't lose
+        # the current $PATH directories.
+        my $rcfile = "$tmpDir/rc";
+        writeFile(
+            $rcfile,
+            '[ -e ~/.bashrc ] && source ~/.bashrc; ' .
+            ($pure ? '' : 'p=$PATH; ' ) .
+            'dontAddDisableDepTrack=1; ' .
+            '[ -e $stdenv/setup ] && source $stdenv/setup; ' .
+            ($pure ? '' : 'PATH=$PATH:$p; ') .
+            'set +e; ' .
+            'PS1="\n\[\033[1;32m\][nix-shell:\w]$\[\033[0m\] "; ' .
+            'unset NIX_ENFORCE_PURITY; ' .
+            $envCommand);
+        exec($ENV{NIX_BUILD_SHELL} // "bash", "--rcfile", $rcfile);
         die;
     }
 

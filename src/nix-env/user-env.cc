@@ -54,21 +54,42 @@ bool createUserEnv(EvalState & state, DrvInfos & elems,
     unsigned int n = 0;
     foreach (DrvInfos::iterator, i, elems) {
         /* Create a pseudo-derivation containing the name, system,
-           output path, and optionally the derivation path, as well as
-           the meta attributes. */
+           output paths, and optionally the derivation path, as well
+           as the meta attributes. */
         Path drvPath = keepDerivations ? i->queryDrvPath(state) : "";
 
         Value & v(*state.allocValue());
         manifest.list.elems[n++] = &v;
-        state.mkAttrs(v, 8);
+        state.mkAttrs(v, 16);
 
         mkString(*state.allocAttr(v, state.sType), "derivation");
         mkString(*state.allocAttr(v, state.sName), i->name);
-        mkString(*state.allocAttr(v, state.sSystem), i->system);
+        if (!i->system.empty())
+            mkString(*state.allocAttr(v, state.sSystem), i->system);
         mkString(*state.allocAttr(v, state.sOutPath), i->queryOutPath(state));
         if (drvPath != "")
             mkString(*state.allocAttr(v, state.sDrvPath), i->queryDrvPath(state));
 
+        // Copy each output.
+        DrvInfo::Outputs outputs = i->queryOutputs(state);
+        Value & vOutputs = *state.allocAttr(v, state.sOutputs);
+        state.mkList(vOutputs, outputs.size());
+        unsigned int m = 0;
+        foreach (DrvInfo::Outputs::iterator, j, outputs) {
+            mkString(*(vOutputs.list.elems[m++] = state.allocValue()), j->first);
+            Value & vOutputs = *state.allocAttr(v, state.symbols.create(j->first));
+            state.mkAttrs(vOutputs, 2);
+            mkString(*state.allocAttr(vOutputs, state.sOutPath), j->second);
+
+            /* This is only necessary when installing store paths, e.g.,
+               `nix-env -i /nix/store/abcd...-foo'. */
+            store->addTempRoot(j->second);
+            store->ensurePath(j->second);
+
+            references.insert(j->second);
+        }
+
+        // Copy the meta attributes.
         Value & vMeta = *state.allocAttr(v, state.sMeta);
         state.mkAttrs(vMeta, 16);
 
@@ -91,16 +112,10 @@ bool createUserEnv(EvalState & state, DrvInfos & elems,
                 default: abort();
             }
         }
-    
+
         vMeta.attrs->sort();
         v.attrs->sort();
-        
-        /* This is only necessary when installing store paths, e.g.,
-           `nix-env -i /nix/store/abcd...-foo'. */
-        store->addTempRoot(i->queryOutPath(state));
-        store->ensurePath(i->queryOutPath(state));
-        
-        references.insert(i->queryOutPath(state));
+
         if (drvPath != "") references.insert(drvPath);
     }
 
@@ -123,13 +138,13 @@ bool createUserEnv(EvalState & state, DrvInfos & elems,
     args.attrs->push_back(Attr(state.symbols.create("derivations"), &manifest));
     args.attrs->sort();
     mkApp(topLevel, envBuilder, args);
-        
+
     /* Evaluate it. */
     debug("evaluating user environment builder");
     DrvInfo topLevelDrv;
     if (!getDerivation(state, topLevel, topLevelDrv, false))
         abort();
-    
+
     /* Realise the resulting store expression. */
     debug("building user environment");
     store->buildPaths(singleton<PathSet>(topLevelDrv.queryDrvPath(state)), state.repair);
@@ -143,7 +158,7 @@ bool createUserEnv(EvalState & state, DrvInfos & elems,
         printMsg(lvlError, format("profile `%1%' changed while we were busy; restarting") % profile);
         return false;
     }
-    
+
     debug(format("switching to new user environment"));
     Path generation = createGeneration(profile, topLevelDrv.queryOutPath(state));
     switchLink(profile, generation);
@@ -181,7 +196,7 @@ static MetaInfo parseMeta(std::istream & str)
         expect(str, "Bind(");
 
         MetaValue value;
-        
+
         string name = parseString(str);
         expect(str, ",");
 
@@ -207,7 +222,7 @@ static MetaInfo parseMeta(std::istream & str)
         expect(str, ",NoPos)");
         meta[name] = value;
     }
-    
+
     expect(str, ")");
 
     return meta;
@@ -221,7 +236,7 @@ static void readLegacyManifest(const Path & path, DrvInfos & elems)
     expect(str, "List([");
 
     unsigned int n = 0;
-    
+
     while (!endOfList(str)) {
         DrvInfo elem;
         expect(str, "Attrs([");
@@ -230,7 +245,7 @@ static void readLegacyManifest(const Path & path, DrvInfos & elems)
             expect(str, "Bind(");
             string name = parseString(str);
             expect(str, ",");
-            
+
             if (name == "meta") elem.setMetaInfo(parseMeta(str));
             else {
                 string value = parseStr(str);
@@ -256,4 +271,3 @@ static void readLegacyManifest(const Path & path, DrvInfos & elems)
 
 
 }
-

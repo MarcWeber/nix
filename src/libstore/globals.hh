@@ -50,6 +50,9 @@ struct Settings {
     /* The directory where the main programs are stored. */
     Path nixBinDir;
 
+    /* File name of the socket the daemon listens to.  */
+    Path nixDaemonSocketFile;
+
     /* Whether to keep temporary directories of failed builds. */
     bool keepFailed;
 
@@ -145,7 +148,7 @@ struct Settings {
 
     /* The directories from the host filesystem to be included in the
        chroot. */
-    PathSet dirsInChroot;
+    StringSet dirsInChroot;
 
     /* Whether to impersonate a Linux 2.6 machine on newer kernels. */
     bool impersonateLinux26;
@@ -155,6 +158,10 @@ struct Settings {
 
     /* Whether to compress logs. */
     bool compressLog;
+
+    /* Maximum number of bytes a builder can write to stdout/stderr
+       before being killed (0 means no limit). */
+    unsigned long maxLogSize;
 
     /* Whether to cache build failures. */
     bool cacheFailure;
@@ -187,13 +194,16 @@ private:
 
     void get(string & res, const string & name);
     void get(bool & res, const string & name);
-    void get(PathSet & res, const string & name);
+    void get(StringSet & res, const string & name);
     template<class N> void get(N & res, const string & name);
 };
 
 
 // FIXME: don't use a global variable.
 extern Settings settings;
+
+
+extern const string nixVersion;
 
 
 }

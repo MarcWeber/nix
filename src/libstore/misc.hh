@@ -17,9 +17,9 @@ Derivation derivationFromPath(StoreAPI & store, const Path & drvPath);
    `storePath' is returned; that is, the closures under the
    `referrers' relation instead of the `references' relation is
    returned. */
-void computeFSClosure(StoreAPI & store, const Path & storePath,
+void computeFSClosure(StoreAPI & store, const Path & path,
     PathSet & paths, bool flipDirection = false,
-    bool includeOutputs = false);
+    bool includeOutputs = false, bool includeDerivers = false);
 
 /* Return the path corresponding to the output identifier `id' in the
    given derivation. */
@@ -31,6 +31,8 @@ Path findOutput(const Derivation & drv, string id);
 void queryMissing(StoreAPI & store, const PathSet & targets,
     PathSet & willBuild, PathSet & willSubstitute, PathSet & unknown,
     unsigned long long & downloadSize, unsigned long long & narSize);
+
+bool willBuildLocally(const Derivation & drv);
 
 
 }

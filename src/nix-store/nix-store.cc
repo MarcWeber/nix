@@ -60,13 +60,21 @@ static Path useDeriver(Path path)
    other paths it means ensure their validity. */
 static PathSet realisePath(const Path & path, bool build = true)
 {
-    if (isDerivation(path)) {
+    DrvPathWithOutputs p = parseDrvPathWithOutputs(path);
+
+    if (isDerivation(p.first)) {
         if (build) store->buildPaths(singleton<PathSet>(path));
-        Derivation drv = derivationFromPath(*store, path);
+        Derivation drv = derivationFromPath(*store, p.first);
         rootNr++;
 
+        if (p.second.empty())
+            foreach (DerivationOutputs::iterator, i, drv.outputs) p.second.insert(i->first);
+
         PathSet outputs;
-        foreach (DerivationOutputs::iterator, i, drv.outputs) {
+        foreach (StringSet::iterator, j, p.second) {
+            DerivationOutputs::iterator i = drv.outputs.find(*j);
+            if (i == drv.outputs.end())
+                throw Error(format("derivation `%1%' does not have an output named `%2%'") % p.first % *j);
             Path outPath = i->second.path;
             if (gcRoot == "")
                 printGCWarning();
@@ -83,6 +91,7 @@ static PathSet realisePath(const Path & path, bool build = true)
 
     else {
         if (build) store->ensurePath(path);
+        else if (!store->isValidPath(path)) throw Error(format("path `%1%' does not exist and cannot be created") % path);
         return singleton<PathSet>(path);
     }
 }
@@ -93,28 +102,46 @@ static void opRealise(Strings opFlags, Strings opArgs)
 {
     bool dryRun = false;
     bool repair = false;
+    bool ignoreUnknown = false;
 
     foreach (Strings::iterator, i, opFlags)
         if (*i == "--dry-run") dryRun = true;
         else if (*i == "--repair") repair = true;
+        else if (*i == "--ignore-unknown") ignoreUnknown = true;
         else throw UsageError(format("unknown flag `%1%'") % *i);
 
-    foreach (Strings::iterator, i, opArgs)
-        *i = followLinksToStorePath(*i);
+    Paths paths;
+    foreach (Strings::iterator, i, opArgs) {
+        DrvPathWithOutputs p = parseDrvPathWithOutputs(*i);
+        paths.push_back(makeDrvPathWithOutputs(followLinksToStorePath(p.first), p.second));
+    }
 
-    printMissing(*store, PathSet(opArgs.begin(), opArgs.end()));
+    unsigned long long downloadSize, narSize;
+    PathSet willBuild, willSubstitute, unknown;
+    queryMissing(*store, PathSet(paths.begin(), paths.end()),
+        willBuild, willSubstitute, unknown, downloadSize, narSize);
+
+    if (ignoreUnknown) {
+        Paths paths2;
+        foreach (Paths::iterator, i, paths)
+            if (unknown.find(*i) == unknown.end()) paths2.push_back(*i);
+        paths = paths2;
+        unknown = PathSet();
+    }
+
+    printMissing(willBuild, willSubstitute, unknown, downloadSize, narSize);
 
     if (dryRun) return;
 
     /* Build all paths at the same time to exploit parallelism. */
-    PathSet paths(opArgs.begin(), opArgs.end());
-    store->buildPaths(paths, repair);
+    store->buildPaths(PathSet(paths.begin(), paths.end()), repair);
 
-    foreach (Paths::iterator, i, opArgs) {
-        PathSet paths = realisePath(*i, false);
-        foreach (PathSet::iterator, j, paths)
-            cout << format("%1%\n") % *j;
-    }
+    if (!ignoreUnknown)
+        foreach (Paths::iterator, i, paths) {
+            PathSet paths = realisePath(*i, false);
+            foreach (PathSet::iterator, j, paths)
+                cout << format("%1%\n") % *j;
+        }
 }
 
 
@@ -211,12 +238,6 @@ static void printTree(const Path & path,
     PathSet references;
     store->queryReferences(path, references);
 
-#if 0
-    for (PathSet::iterator i = drv.inputSrcs.begin();
-         i != drv.inputSrcs.end(); ++i)
-        cout << format("%1%%2%\n") % (tailPad + treeConn) % *i;
-#endif
-
     /* Topologically sort under the relation A < B iff A \in
        closure(B).  That is, if derivation A is an (possibly indirect)
        input of B, then A is printed first.  This has the effect of
@@ -224,7 +245,7 @@ static void printTree(const Path & path,
     Paths sorted = topoSortPaths(*store, references);
     reverse(sorted.begin(), sorted.end());
 
-    for (Paths::iterator i = sorted.begin(); i != sorted.end(); ++i) {
+    foreach (Paths::iterator, i, sorted) {
         Paths::iterator j = i; ++j;
         printTree(*i, tailPad + treeConn,
             j == sorted.end() ? tailPad + treeNull : tailPad + treeLine,
@@ -266,7 +287,7 @@ static void opQuery(Strings opFlags, Strings opArgs)
         else if (*i == "--resolve") query = qResolve;
         else if (*i == "--roots") query = qRoots;
         else if (*i == "--use-output" || *i == "-u") useOutput = true;
-        else if (*i == "--force-realise" || *i == "-f") forceRealise = true;
+        else if (*i == "--force-realise" || *i == "--force-realize" || *i == "-f") forceRealise = true;
         else if (*i == "--include-outputs") includeOutputs = true;
         else throw UsageError(format("unknown flag `%1%'") % *i);
 
@@ -377,7 +398,8 @@ static void opQuery(Strings opFlags, Strings opArgs)
             foreach (Strings::iterator, i, opArgs) {
                 PathSet paths = maybeUseOutputs(followLinksToStorePath(*i), useOutput, forceRealise);
                 foreach (PathSet::iterator, j, paths)
-                    computeFSClosure(*store, *j, referrers, true);
+                    computeFSClosure(*store, *j, referrers, true,
+                        settings.gcKeepOutputs, settings.gcKeepDerivations);
             }
             Roots roots = store->findRoots();
             foreach (Roots::iterator, i, roots)
@@ -432,35 +454,42 @@ static void opReadLog(Strings opFlags, Strings opArgs)
     foreach (Strings::iterator, i, opArgs) {
         Path path = useDeriver(followLinksToStorePath(*i));
 
-        Path logPath = (format("%1%/%2%/%3%") %
-            settings.nixLogDir % drvsLogDir % baseNameOf(path)).str();
-        Path logBz2Path = logPath + ".bz2";
+        for (int j = 0; j <= 2; j++) {
+            if (j == 2) throw Error(format("build log of derivation `%1%' is not available") % path);
 
-        if (pathExists(logPath)) {
-            /* !!! Make this run in O(1) memory. */
-            string log = readFile(logPath);
-            writeFull(STDOUT_FILENO, (const unsigned char *) log.data(), log.size());
+            string baseName = baseNameOf(path);
+            Path logPath =
+                j == 0
+                ? (format("%1%/%2%/%3%/%4%") % settings.nixLogDir % drvsLogDir % string(baseName, 0, 2) % string(baseName, 2)).str()
+                : (format("%1%/%2%/%3%") % settings.nixLogDir % drvsLogDir % baseName).str();
+            Path logBz2Path = logPath + ".bz2";
+
+            if (pathExists(logPath)) {
+                /* !!! Make this run in O(1) memory. */
+                string log = readFile(logPath);
+                writeFull(STDOUT_FILENO, (const unsigned char *) log.data(), log.size());
+                break;
+            }
+
+            else if (pathExists(logBz2Path)) {
+                AutoCloseFD fd = open(logBz2Path.c_str(), O_RDONLY);
+                FILE * f = 0;
+                if (fd == -1 || (f = fdopen(fd.borrow(), "r")) == 0)
+                    throw SysError(format("opening file `%1%'") % logBz2Path);
+                int err;
+                BZFILE * bz = BZ2_bzReadOpen(&err, f, 0, 0, 0, 0);
+                if (!bz) throw Error(format("cannot open bzip2 file `%1%'") % logBz2Path);
+                unsigned char buf[128 * 1024];
+                do {
+                    int n = BZ2_bzRead(&err, bz, buf, sizeof(buf));
+                    if (err != BZ_OK && err != BZ_STREAM_END)
+                        throw Error(format("error reading bzip2 file `%1%'") % logBz2Path);
+                    writeFull(STDOUT_FILENO, buf, n);
+                } while (err != BZ_STREAM_END);
+                BZ2_bzReadClose(&err, bz);
+                break;
+            }
         }
-
-        else if (pathExists(logBz2Path)) {
-            AutoCloseFD fd = open(logBz2Path.c_str(), O_RDONLY);
-            FILE * f = 0;
-            if (fd == -1 || (f = fdopen(fd.borrow(), "r")) == 0)
-                throw SysError(format("opening file `%1%'") % logBz2Path);
-            int err;
-            BZFILE * bz = BZ2_bzReadOpen(&err, f, 0, 0, 0, 0);
-            if (!bz) throw Error(format("cannot open bzip2 file `%1%'") % logBz2Path);
-            unsigned char buf[128 * 1024];
-            do {
-                int n = BZ2_bzRead(&err, bz, buf, sizeof(buf));
-                if (err != BZ_OK && err != BZ_STREAM_END)
-                    throw Error(format("error reading bzip2 file `%1%'") % logBz2Path);
-                writeFull(STDOUT_FILENO, buf, n);
-            } while (err != BZ_STREAM_END);
-            BZ2_bzReadClose(&err, bz);
-        }
-
-        else throw Error(format("build log of derivation `%1%' is not available") % path);
     }
 }
 
@@ -486,7 +515,7 @@ static void registerValidity(bool reregister, bool hashGiven, bool canonicalise)
         if (!store->isValidPath(info.path) || reregister) {
             /* !!! races */
             if (canonicalise)
-                canonicalisePathMetaData(info.path);
+                canonicalisePathMetaData(info.path, -1);
             if (!hashGiven) {
                 HashResult hash = hashPath(htSHA256, info.path);
                 info.hash = hash.first;
@@ -665,7 +694,9 @@ static void opExport(Strings opFlags, Strings opArgs)
         else throw UsageError(format("unknown flag `%1%'") % *i);
 
     FdSink sink(STDOUT_FILENO);
-    exportPaths(*store, opArgs, sign, sink);
+    Paths sorted = topoSortPaths(*store, PathSet(opArgs.begin(), opArgs.end()));
+    reverse(sorted.begin(), sorted.end());
+    exportPaths(*store, sorted, sign, sink);
 }
 
 
@@ -814,7 +845,7 @@ void run(Strings args)
 
         Operation oldOp = op;
 
-        if (arg == "--realise" || arg == "-r")
+        if (arg == "--realise" || arg == "--realize" || arg == "-r")
             op = opRealise;
         else if (arg == "--add" || arg == "-A")
             op = opAdd;
@@ -856,7 +887,7 @@ void run(Strings args)
             op = opVerifyPath;
         else if (arg == "--repair-path")
             op = opRepairPath;
-        else if (arg == "--optimise")
+        else if (arg == "--optimise" || arg == "--optimize")
             op = opOptimise;
         else if (arg == "--query-failed-paths")
             op = opQueryFailedPaths;

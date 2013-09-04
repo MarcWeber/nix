@@ -3,6 +3,7 @@
 #include "remote-store.hh"
 #include "worker-protocol.hh"
 #include "archive.hh"
+#include "affinity.hh"
 #include "globals.hh"
 
 #include <sys/types.h>
@@ -14,7 +15,6 @@
 #include <iostream>
 #include <unistd.h>
 #include <cstring>
-
 
 namespace nix {
 
@@ -71,8 +71,19 @@ void RemoteStore::openConnection(bool reserveSpace)
         if (GET_PROTOCOL_MAJOR(daemonVersion) != GET_PROTOCOL_MAJOR(PROTOCOL_VERSION))
             throw Error("Nix daemon protocol version not supported");
         writeInt(PROTOCOL_VERSION, to);
+
+        if (GET_PROTOCOL_MINOR(daemonVersion) >= 14) {
+            int cpu = lockToCurrentCPU();
+            if (cpu != -1) {
+                writeInt(1, to);
+                writeInt(cpu, to);
+            } else
+                writeInt(0, to);
+        }
+
         if (GET_PROTOCOL_MINOR(daemonVersion) >= 11)
             writeInt(reserveSpace, to);
+
         processStderr();
     }
     catch (Error & e) {
@@ -91,7 +102,7 @@ void RemoteStore::connectToDaemon()
         throw SysError("cannot create Unix domain socket");
     closeOnExec(fdSocket);
 
-    string socketPath = settings.nixStateDir + DEFAULT_SOCKET_PATH;
+    string socketPath = settings.nixDaemonSocketFile;
 
     /* Urgh, sockaddr_un allows path names of only 108 characters.  So
        chdir to the socket directory so that we can pass a relative
@@ -334,6 +345,16 @@ Path RemoteStore::queryDeriver(const Path & path)
 }
 
 
+PathSet RemoteStore::queryValidDerivers(const Path & path)
+{
+    openConnection();
+    writeInt(wopQueryValidDerivers, to);
+    writeString(path, to);
+    processStderr();
+    return readStorePaths<PathSet>(from);
+}
+
+
 PathSet RemoteStore::queryDerivationOutputs(const Path & path)
 {
     openConnection();
@@ -431,7 +452,16 @@ void RemoteStore::buildPaths(const PathSet & drvPaths, bool repair)
     if (repair) throw Error("repairing is not supported when building through the Nix daemon");
     openConnection();
     writeInt(wopBuildPaths, to);
-    writeStrings(drvPaths, to);
+    if (GET_PROTOCOL_MINOR(daemonVersion) >= 13)
+        writeStrings(drvPaths, to);
+    else {
+        /* For backwards compatibility with old daemons, strip output
+           identifiers. */
+        PathSet drvPaths2;
+        foreach (PathSet::const_iterator, i, drvPaths)
+            drvPaths2.insert(string(*i, 0, i->find('!')));
+        writeStrings(drvPaths2, to);
+    }
     processStderr();
     readInt(from);
 }
@@ -556,7 +586,7 @@ void RemoteStore::processStderr(Sink * sink, Source * source)
         }
         else {
             string s = readString(from);
-            writeToStderr((const unsigned char *) s.data(), s.size());
+            writeToStderr(s);
         }
     }
     if (msg == STDERR_ERROR) {

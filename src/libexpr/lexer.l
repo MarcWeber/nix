@@ -9,7 +9,6 @@
 
 %{
 #include "nixexpr.hh"
-#define BISON_HEADER_HACK
 #include "parser-tab.hh"
 
 using namespace nix;
@@ -102,6 +101,8 @@ or          { return OR_KW; }
 
 \=\=        { return EQ; }
 \!\=        { return NEQ; }
+\<\=        { return LEQ; }
+\>\=        { return GEQ; }
 \&\&        { return AND; }
 \|\|        { return OR; }
 \-\>        { return IMPL; }
@@ -109,8 +110,10 @@ or          { return OR_KW; }
 \+\+        { return CONCAT; }
 
 {ID}        { yylval->id = strdup(yytext); return ID; }
-{INT}       { int n = atoi(yytext); /* !!! overflow */
-              yylval->n = n;
+{INT}       { errno = 0;
+              yylval->n = strtol(yytext, 0, 10);
+              if (errno != 0)
+                  throw ParseError(format("invalid integer `%1%'") % yytext);
               return INT;
             }
 

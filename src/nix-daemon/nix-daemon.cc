@@ -4,9 +4,9 @@
 #include "serialise.hh"
 #include "worker-protocol.hh"
 #include "archive.hh"
+#include "affinity.hh"
 #include "globals.hh"
 
-#include <iostream>
 #include <cstring>
 #include <unistd.h>
 #include <signal.h>
@@ -26,8 +26,13 @@ using namespace nix;
    that lack it, we only notice the disconnection the next time we try
    to write to the client.  So if you have a builder that never
    generates output on stdout/stderr, the daemon will never notice
-   that the client has disconnected until the builder terminates. */
-#ifdef O_ASYNC
+   that the client has disconnected until the builder terminates.
+
+   GNU/Hurd does have O_ASYNC, but its Unix-domain socket translator
+   (pflocal) does not implement F_SETOWN.  See
+   <http://lists.gnu.org/archive/html/bug-guix/2013-07/msg00021.html> for
+   details.*/
+#if defined O_ASYNC && !defined __GNU__
 #define HAVE_HUP_NOTIFICATION
 #ifndef SIGPOLL
 #define SIGPOLL SIGIO
@@ -274,7 +279,7 @@ struct SavingSourceAdapter : Source
 };
 
 
-static void performOp(unsigned int clientVersion,
+static void performOp(bool trusted, unsigned int clientVersion,
     Source & from, Sink & to, unsigned int op)
 {
     switch (op) {
@@ -335,6 +340,7 @@ static void performOp(unsigned int clientVersion,
 
     case wopQueryReferences:
     case wopQueryReferrers:
+    case wopQueryValidDerivers:
     case wopQueryDerivationOutputs: {
         Path path = readStorePath(from);
         startWork();
@@ -343,6 +349,8 @@ static void performOp(unsigned int clientVersion,
             store->queryReferences(path, paths);
         else if (op == wopQueryReferrers)
             store->queryReferrers(path, paths);
+        else if (op == wopQueryValidDerivers)
+            paths = store->queryValidDerivers(path);
         else paths = store->queryDerivationOutputs(path);
         stopWork();
         writeStrings(paths, to);
@@ -549,7 +557,10 @@ static void performOp(unsigned int clientVersion,
             for (unsigned int i = 0; i < n; i++) {
                 string name = readString(from);
                 string value = readString(from);
-                settings.set("untrusted-" + name, value);
+                if (name == "build-timeout")
+                    string2Int(value, settings.buildTimeout);
+                else
+                    settings.set(trusted ? name : "untrusted-" + name, value);
             }
         }
         startWork();
@@ -638,11 +649,11 @@ static void performOp(unsigned int clientVersion,
 }
 
 
-static void processConnection()
+static void processConnection(bool trusted)
 {
     canSendStderr = false;
     myPid = getpid();
-    writeToStderr = tunnelStderr;
+    _writeToStderr = tunnelStderr;
 
 #ifdef HAVE_HUP_NOTIFICATION
     /* Allow us to receive SIGPOLL for events on the client socket. */
@@ -660,6 +671,9 @@ static void processConnection()
     writeInt(PROTOCOL_VERSION, to);
     to.flush();
     unsigned int clientVersion = readInt(from);
+
+    if (GET_PROTOCOL_MINOR(clientVersion) >= 14 && readInt(from))
+        setAffinityTo(readInt(from));
 
     bool reserveSpace = true;
     if (GET_PROTOCOL_MINOR(clientVersion) >= 11)
@@ -706,7 +720,7 @@ static void processConnection()
         opCount++;
 
         try {
-            performOp(clientVersion, from, to, op);
+            performOp(trusted, clientVersion, from, to, op);
         } catch (Error & e) {
             /* If we're not in a state were we can send replies, then
                something went wrong processing the input of the
@@ -772,7 +786,7 @@ static void daemonLoop()
         if (fdSocket == -1)
             throw SysError("cannot create Unix domain socket");
 
-        string socketPath = settings.nixStateDir + DEFAULT_SOCKET_PATH;
+        string socketPath = settings.nixDaemonSocketFile;
 
         createDirs(dirOf(socketPath));
 
@@ -834,6 +848,7 @@ static void daemonLoop()
             /* Get the identity of the caller, if possible. */
             uid_t clientUid = -1;
             pid_t clientPid = -1;
+            bool trusted = false;
 
 #if defined(SO_PEERCRED)
             ucred cred;
@@ -841,6 +856,7 @@ static void daemonLoop()
             if (getsockopt(remote, SOL_SOCKET, SO_PEERCRED, &cred, &credLen) != -1) {
                 clientPid = cred.pid;
                 clientUid = cred.uid;
+                if (clientUid == 0) trusted = true;
             }
 #endif
 
@@ -874,10 +890,10 @@ static void daemonLoop()
                     /* Handle the connection. */
                     from.fd = remote;
                     to.fd = remote;
-                    processConnection();
+                    processConnection(trusted);
 
                 } catch (std::exception & e) {
-                    std::cerr << format("child error: %1%\n") % e.what();
+                    writeToStderr("child error: " + string(e.what()) + "\n");
                 }
                 exit(0);
             }
@@ -893,8 +909,6 @@ static void daemonLoop()
 
 void run(Strings args)
 {
-    bool daemon = false;
-
     for (Strings::iterator i = args.begin(); i != args.end(); ) {
         string arg = *i++;
         if (arg == "--daemon") /* ignored for backwards compatibility */;

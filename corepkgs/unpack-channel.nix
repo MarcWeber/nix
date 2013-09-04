@@ -6,7 +6,15 @@ let
     ''
       mkdir $out
       cd $out
-      ${bzip2} -d < $src | ${tar} xf - ${tarFlags}
+      xzpat="\.xz\$"
+      gzpat="\.gz\$"
+      if [[ "$src" =~ $xzpat ]]; then
+        ${xz} -d < $src | ${tar} xf - ${tarFlags}
+      elif [[ "$src" =~ $gzpat ]]; then
+        ${gzip} -d < $src | ${tar} xf - ${tarFlags}
+      else
+        ${bzip2} -d < $src | ${tar} xf - ${tarFlags}
+      fi
       mv * $out/$channelName
       if [ -n "$binaryCacheURL" ]; then
         mkdir $out/binary-caches

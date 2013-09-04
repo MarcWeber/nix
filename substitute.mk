@@ -7,6 +7,7 @@
 	 -e "s^@bindir\@^$(bindir)^g" \
 	 -e "s^@datadir\@^$(datadir)^g" \
 	 -e "s^@sysconfdir\@^$(sysconfdir)^g" \
+	 -e "s^@profiledir\@^$(profiledir)^g" \
 	 -e "s^@localstatedir\@^$(localstatedir)^g" \
 	 -e "s^@datadir\@^$(datadir)^g" \
 	 -e "s^@libdir\@^$(libdir)^g" \
@@ -36,3 +37,6 @@
 	 -e "s^@testPath\@^$(coreutils):$$(dirname $$(type -p expr))^g" \
 	 < $< > $@ || rm $@
 	if test -x $<; then chmod +x $@; fi
+
+$(CONFIG_HEADER):
+	true

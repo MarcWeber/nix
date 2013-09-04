@@ -52,7 +52,8 @@ struct PrimOp
 struct Env
 {
     Env * up;
-    unsigned int prevWith; // nr of levels up to next `with' environment
+    unsigned short prevWith; // nr of levels up to next `with' environment
+    bool haveWithAttrs;
     Value * values[0];
 };
 
@@ -93,7 +94,7 @@ public:
     SymbolTable symbols;
 
     const Symbol sWith, sOutPath, sDrvPath, sType, sMeta, sName,
-        sSystem, sOverrides;
+        sSystem, sOverrides, sOutputs, sOutputName, sIgnoreNulls;
 
     /* If set, force copying files to the Nix store even if they
        already exist there. */
@@ -158,7 +159,7 @@ public:
     void strictForceValue(Value & v);
 
     /* Force `v', and then verify that it has the expected type. */
-    int forceInt(Value & v);
+    NixInt forceInt(Value & v);
     bool forceBool(Value & v);
     inline void forceAttrs(Value & v);
     inline void forceList(Value & v);
@@ -174,7 +175,7 @@ public:
     /* String coercion.  Converts strings, paths and derivations to a
        string.  If `coerceMore' is set, also converts nulls, integers,
        booleans and lists to a string.  If `copyToStore' is set,
-       referenced paths are copied to the Nix store as a side effect.q */
+       referenced paths are copied to the Nix store as a side effect. */
     string coerceToString(Value & v, PathSet & context,
         bool coerceMore = false, bool copyToStore = true);
 
@@ -205,7 +206,7 @@ private:
     void addPrimOp(const string & name,
         unsigned int arity, PrimOpFun primOp);
 
-    inline Value * lookupVar(Env * env, const VarRef & var);
+    inline Value * lookupVar(Env * env, const VarRef & var, bool noEval);
     
     friend class ExprVar;
     friend class ExprAttrs;
@@ -259,7 +260,7 @@ private:
     typedef std::map<Symbol, unsigned int> PrimOpCalls;
     PrimOpCalls primOpCalls;
 
-    typedef std::map<Pos, unsigned int> FunctionCalls;
+    typedef std::map<ExprLambda *, unsigned int> FunctionCalls;
     FunctionCalls functionCalls;
 
     typedef std::map<Pos, unsigned int> AttrSelects;

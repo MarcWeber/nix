@@ -63,6 +63,7 @@ struct Expr
     virtual void bindVars(const StaticEnv & env);
     virtual void eval(EvalState & state, Env & env, Value & v);
     virtual Value * maybeThunk(EvalState & state, Env & env);
+    virtual void setName(Symbol & name);
 };
 
 std::ostream & operator << (std::ostream & str, Expr & e);
@@ -74,9 +75,9 @@ std::ostream & operator << (std::ostream & str, Expr & e);
 
 struct ExprInt : Expr
 {
-    int n;
+    NixInt n;
     Value v;
-    ExprInt(int n) : n(n) { mkInt(v, n); };
+    ExprInt(NixInt n) : n(n) { mkInt(v, n); };
     COMMON_METHODS
     Value * maybeThunk(EvalState & state, Env & env);
 };
@@ -158,12 +159,10 @@ struct ExprAttrs : Expr
     bool recursive;
     struct AttrDef {
         bool inherited;
-        Expr * e; // if not inherited
-        VarRef var; // if inherited
+        Expr * e;
         Pos pos;
         unsigned int displ; // displacement
-        AttrDef(Expr * e, const Pos & pos) : inherited(false), e(e), pos(pos) { };
-        AttrDef(const Symbol & name, const Pos & pos) : inherited(true), var(name), pos(pos) { };
+        AttrDef(Expr * e, const Pos & pos, bool inherited=false) : inherited(inherited), e(e), pos(pos) { };
         AttrDef() { };
     };
     typedef std::map<Symbol, AttrDef> AttrDefs;
@@ -197,6 +196,7 @@ struct Formals
 struct ExprLambda : Expr
 {
     Pos pos;
+    Symbol name;
     Symbol arg;
     bool matchAttrs;
     Formals * formals;
@@ -208,6 +208,8 @@ struct ExprLambda : Expr
             throw ParseError(format("duplicate formal function argument `%1%' at %2%")
                 % arg % pos);
     };
+    void setName(Symbol & name);
+    string showNamePos();
     COMMON_METHODS
 };
 
@@ -277,8 +279,10 @@ MakeBinOp(OpConcatLists, "++")
 
 struct ExprConcatStrings : Expr
 {
+    bool forceString;
     vector<Expr *> * es;
-    ExprConcatStrings(vector<Expr *> * es) : es(es) { };
+    ExprConcatStrings(bool forceString, vector<Expr *> * es)
+        : forceString(forceString), es(es) { };
     COMMON_METHODS
 };
 

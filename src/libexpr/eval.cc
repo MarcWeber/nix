@@ -138,10 +138,13 @@ EvalState::EvalState()
     , sName(symbols.create("name"))
     , sSystem(symbols.create("system"))
     , sOverrides(symbols.create("__overrides"))
+    , sOutputs(symbols.create("outputs"))
+    , sOutputName(symbols.create("outputName"))
+    , sIgnoreNulls(symbols.create("__ignoreNulls"))
+    , repair(false)
     , baseEnv(allocEnv(128))
     , baseEnvDispl(0)
     , staticBaseEnv(false, 0)
-    , repair(false)
 {
     nrEnvs = nrValuesInEnvs = nrValues = nrListElems = 0;
     nrAttrsets = nrOpUpdates = nrOpUpdateValuesCopied = 0;
@@ -155,7 +158,7 @@ EvalState::EvalState()
            physical RAM, up to a maximum of 384 MiB) so that in most
            cases we don't need to garbage collect at all.  (Collection
            has a fairly significant overhead.)  The heap size can be
-           overriden through libgc's GC_INITIAL_HEAP_SIZE environment
+           overridden through libgc's GC_INITIAL_HEAP_SIZE environment
            variable.  We should probably also provide a nix.conf
            setting for this.  Note that GC_expand_hp() causes a lot of
            virtual, but not physical (resident) memory to be
@@ -244,6 +247,11 @@ LocalNoInlineNoReturn(void throwTypeError(const char * s, const Pos & pos, const
     throw TypeError(format(s) % pos % s2);
 }
 
+LocalNoInlineNoReturn(void throwTypeError(const char * s, const string & s1, const string & s2))
+{
+    throw TypeError(format(s) % s1 % s2);
+}
+
 LocalNoInlineNoReturn(void throwTypeError(const char * s, const Pos & pos))
 {
     throw TypeError(format(s) % pos);
@@ -296,23 +304,29 @@ void mkPath(Value & v, const char * s)
 }
 
 
-inline Value * EvalState::lookupVar(Env * env, const VarRef & var)
+inline Value * EvalState::lookupVar(Env * env, const VarRef & var, bool noEval)
 {
     for (unsigned int l = var.level; l; --l, env = env->up) ;
-    
-    if (var.fromWith) {
-        while (1) {
-            Bindings::iterator j = env->values[0]->attrs->find(var.name);
-            if (j != env->values[0]->attrs->end()) {
-                if (countCalls && j->pos) attrSelects[*j->pos]++;
-                return j->value;
-            }
-            if (env->prevWith == 0)
-                throwEvalError("undefined variable `%1%'", var.name);
-            for (unsigned int l = env->prevWith; l; --l, env = env->up) ;
+
+    if (!var.fromWith) return env->values[var.displ];
+
+    while (1) {
+        if (!env->haveWithAttrs) {
+            if (noEval) return 0;
+            Expr * attrs = (Expr *) env->values[0];
+            env->values[0] = allocValue();
+            evalAttrs(*env->up, attrs, *env->values[0]);
+            env->haveWithAttrs = true;
         }
-    } else
-        return env->values[var.displ];
+        Bindings::iterator j = env->values[0]->attrs->find(var.name);
+        if (j != env->values[0]->attrs->end()) {
+            if (countCalls && j->pos) attrSelects[*j->pos]++;
+            return j->value;
+        }
+        if (!env->prevWith)
+            throwEvalError("undefined variable `%1%'", var.name);
+        for (unsigned int l = env->prevWith; l; --l, env = env->up) ;
+    }
 }
 
 
@@ -329,7 +343,7 @@ Env & EvalState::allocEnv(unsigned int size)
     nrValuesInEnvs += size;
     Env * env = (Env *) GC_MALLOC(sizeof(Env) + size * sizeof(Value *));
 
-    /* Clear the values because maybeThunk() expects this. */
+    /* Clear the values because maybeThunk() and lookupVar fromWith expects this. */
     for (unsigned i = 0; i < size; ++i)
         env->values[i] = 0;
     
@@ -397,7 +411,7 @@ unsigned long nrAvoided = 0;
 
 Value * ExprVar::maybeThunk(EvalState & state, Env & env)
 {
-    Value * v = state.lookupVar(&env, info);
+    Value * v = state.lookupVar(&env, info, true);
     /* The value might not be initialised in the environment yet.
        In that case, ignore it. */
     if (v) { nrAvoided++; return v; }
@@ -507,23 +521,17 @@ void ExprAttrs::eval(EvalState & state, Env & env, Value & v)
            environment, while the inherited attributes are evaluated
            in the original environment. */
         unsigned int displ = 0;
-        foreach (AttrDefs::iterator, i, attrs)
-            if (i->second.inherited) {
-                /* !!! handle overrides? */
-                Value * vAttr = state.lookupVar(&env, i->second.var);
-                env2.values[displ++] = vAttr;
-                v.attrs->push_back(Attr(i->first, vAttr, &i->second.pos));
-            } else {
-                Value * vAttr;
-                if (hasOverrides) {
-                    vAttr = state.allocValue();
-                    mkThunk(*vAttr, env2, i->second.e);
-                } else
-                    vAttr = i->second.e->maybeThunk(state, env2);
-                env2.values[displ++] = vAttr;
-                v.attrs->push_back(Attr(i->first, vAttr, &i->second.pos));
-            }
-        
+        foreach (AttrDefs::iterator, i, attrs) {
+            Value * vAttr;
+            if (hasOverrides && !i->second.inherited) {
+                vAttr = state.allocValue();
+                mkThunk(*vAttr, env2, i->second.e);
+            } else
+                vAttr = i->second.e->maybeThunk(state, i->second.inherited ? env : env2);
+            env2.values[displ++] = vAttr;
+            v.attrs->push_back(Attr(i->first, vAttr, &i->second.pos));
+        }
+
         /* If the rec contains an attribute called `__overrides', then
            evaluate it, and add the attributes in that set to the rec.
            This allows overriding of recursive attributes, which is
@@ -549,10 +557,7 @@ void ExprAttrs::eval(EvalState & state, Env & env, Value & v)
 
     else {
         foreach (AttrDefs::iterator, i, attrs)
-            if (i->second.inherited)
-                v.attrs->push_back(Attr(i->first, state.lookupVar(&env, i->second.var), &i->second.pos));
-            else
-                v.attrs->push_back(Attr(i->first, i->second.e->maybeThunk(state, env), &i->second.pos));
+            v.attrs->push_back(Attr(i->first, i->second.e->maybeThunk(state, env), &i->second.pos));
     }
 }
 
@@ -569,10 +574,7 @@ void ExprLet::eval(EvalState & state, Env & env, Value & v)
        environment. */
     unsigned int displ = 0;
     foreach (ExprAttrs::AttrDefs::iterator, i, attrs->attrs)
-        if (i->second.inherited)
-            env2.values[displ++] = state.lookupVar(&env, i->second.var);
-        else
-            env2.values[displ++] = i->second.e->maybeThunk(state, env2);
+        env2.values[displ++] = i->second.e->maybeThunk(state, i->second.inherited ? env : env2);
 
     body->eval(state, env2, v);
 }
@@ -588,7 +590,7 @@ void ExprList::eval(EvalState & state, Env & env, Value & v)
 
 void ExprVar::eval(EvalState & state, Env & env, Value & v)
 {
-    Value * v2 = state.lookupVar(&env, info);
+    Value * v2 = state.lookupVar(&env, info, false);
     state.forceValue(*v2);
     v = *v2;
 }
@@ -752,8 +754,8 @@ void EvalState::callFunction(Value & fun, Value & arg, Value & v)
         foreach (Formals::Formals_::iterator, i, fun.lambda.fun->formals->formals) {
             Bindings::iterator j = arg.attrs->find(i->name);
             if (j == arg.attrs->end()) {
-                if (!i->def) throwTypeError("function at %1% called without required argument `%2%'",
-                    fun.lambda.fun->pos, i->name);
+                if (!i->def) throwTypeError("%1% called without required argument `%2%'",
+                    fun.lambda.fun->showNamePos(), i->name);
                 env2.values[displ++] = i->def->maybeThunk(*this, env2);
             } else {
                 attrsUsed++;
@@ -762,20 +764,24 @@ void EvalState::callFunction(Value & fun, Value & arg, Value & v)
         }
 
         /* Check that each actual argument is listed as a formal
-           argument (unless the attribute match specifies a `...').
-           TODO: show the names of the expected/unexpected
-           arguments. */
-        if (!fun.lambda.fun->formals->ellipsis && attrsUsed != arg.attrs->size()) 
-            throwTypeError("function at %1% called with unexpected argument", fun.lambda.fun->pos);
+           argument (unless the attribute match specifies a `...'). */
+        if (!fun.lambda.fun->formals->ellipsis && attrsUsed != arg.attrs->size()) {
+            /* Nope, so show the first unexpected argument to the
+               user. */
+            foreach (Bindings::iterator, i, *arg.attrs)
+                if (fun.lambda.fun->formals->argNames.find(i->name) == fun.lambda.fun->formals->argNames.end())
+                    throwTypeError("%1% called with unexpected argument `%2%'", fun.lambda.fun->showNamePos(), i->name);
+            abort(); // can't happen
+        }
     }
 
     nrFunctionCalls++;
-    if (countCalls) functionCalls[fun.lambda.fun->pos]++;
+    if (countCalls) functionCalls[fun.lambda.fun]++;
 
     try {
         fun.lambda.fun->body->eval(*this, env2, v);
     } catch (Error & e) {
-        addErrorPrefix(e, "while evaluating the function at %1%:\n", fun.lambda.fun->pos);
+        addErrorPrefix(e, "while evaluating %1%:\n", fun.lambda.fun->showNamePos());
         throw;
     }
 }
@@ -790,20 +796,20 @@ void EvalState::autoCallFunction(Bindings & args, Value & fun, Value & res)
         return;
     }
 
-    Value actualArgs;
-    mkAttrs(actualArgs, fun.lambda.fun->formals->formals.size());
+    Value * actualArgs = allocValue();
+    mkAttrs(*actualArgs, fun.lambda.fun->formals->formals.size());
 
     foreach (Formals::Formals_::iterator, i, fun.lambda.fun->formals->formals) {
         Bindings::iterator j = args.find(i->name);
         if (j != args.end())
-            actualArgs.attrs->push_back(*j);
+            actualArgs->attrs->push_back(*j);
         else if (!i->def)
             throwTypeError("cannot auto-call a function that has an argument without a default value (`%1%')", i->name);
     }
 
-    actualArgs.attrs->sort();
+    actualArgs->attrs->sort();
 
-    callFunction(fun, actualArgs, res);
+    callFunction(fun, *actualArgs, res);
 }
 
 
@@ -812,9 +818,8 @@ void ExprWith::eval(EvalState & state, Env & env, Value & v)
     Env & env2(state.allocEnv(1));
     env2.up = &env;
     env2.prevWith = prevWith;
-
-    env2.values[0] = state.allocValue();
-    state.evalAttrs(env, attrs, *env2.values[0]);
+    env2.haveWithAttrs = false;
+    env2.values[0] = (Value *) attrs;
 
     body->eval(state, env2, v);
 }
@@ -951,31 +956,39 @@ void ExprConcatStrings::eval(EvalState & state, Env & env, Value & v)
 {
     PathSet context;
     std::ostringstream s;
-        
-    bool first = true, isPath = false;
-    Value vStr;
+    NixInt n = 0;
+
+    bool first = true;
+    ValueType firstType;
 
     foreach (vector<Expr *>::iterator, i, *es) {
-        (*i)->eval(state, env, vStr);
+        Value vTmp;
+        (*i)->eval(state, env, vTmp);
 
         /* If the first element is a path, then the result will also
            be a path, we don't copy anything (yet - that's done later,
            since paths are copied when they are used in a derivation),
            and none of the strings are allowed to have contexts. */
         if (first) {
-            isPath = vStr.type == tPath;
+            firstType = vTmp.type;
             first = false;
         }
 
-        s << state.coerceToString(vStr, context, false, !isPath);
+        if (firstType == tInt && !forceString) {
+            if (vTmp.type != tInt)
+                throwEvalError("cannot add %1% to an integer", showType(vTmp));
+            n += vTmp.integer;
+        } else
+            s << state.coerceToString(vTmp, context, false, firstType != tPath);
     }
-        
-    if (isPath && !context.empty())
-        throwEvalError("a string that refers to a store path cannot be appended to a path, in `%1%'", s.str());
 
-    if (isPath)
+    if (firstType == tInt)
+        mkInt(v, n);
+    else if (firstType == tPath) {
+        if (!context.empty())
+            throwEvalError("a string that refers to a store path cannot be appended to a path, in `%1%'", s.str());
         mkPath(v, s.str().c_str());
-    else
+    } else
         mkString(v, s.str(), context);
 }
 
@@ -996,7 +1009,7 @@ void EvalState::strictForceValue(Value & v)
 }
 
 
-int EvalState::forceInt(Value & v)
+NixInt EvalState::forceInt(Value & v)
 {
     forceValue(v);
     if (v.type != tInt)
@@ -1258,23 +1271,23 @@ void EvalState::printStats()
 
         printMsg(v, format("calls to %1% primops:") % primOpCalls.size());
         typedef std::multimap<unsigned int, Symbol> PrimOpCalls_;
-        std::multimap<unsigned int, Symbol> primOpCalls_;
+        PrimOpCalls_ primOpCalls_;
         foreach (PrimOpCalls::iterator, i, primOpCalls)
             primOpCalls_.insert(std::pair<unsigned int, Symbol>(i->second, i->first));
         foreach_reverse (PrimOpCalls_::reverse_iterator, i, primOpCalls_)
             printMsg(v, format("%1$10d %2%") % i->first % i->second);
 
         printMsg(v, format("calls to %1% functions:") % functionCalls.size());
-        typedef std::multimap<unsigned int, Pos> FunctionCalls_;
-        std::multimap<unsigned int, Pos> functionCalls_;
+        typedef std::multimap<unsigned int, ExprLambda *> FunctionCalls_;
+        FunctionCalls_ functionCalls_;
         foreach (FunctionCalls::iterator, i, functionCalls)
-            functionCalls_.insert(std::pair<unsigned int, Pos>(i->second, i->first));
+            functionCalls_.insert(std::pair<unsigned int, ExprLambda *>(i->second, i->first));
         foreach_reverse (FunctionCalls_::reverse_iterator, i, functionCalls_)
-            printMsg(v, format("%1$10d %2%") % i->first % i->second);
+            printMsg(v, format("%1$10d %2%") % i->first % i->second->showNamePos());
 
         printMsg(v, format("evaluations of %1% attributes:") % attrSelects.size());
         typedef std::multimap<unsigned int, Pos> AttrSelects_;
-        std::multimap<unsigned int, Pos> attrSelects_;
+        AttrSelects_ attrSelects_;
         foreach (AttrSelects::iterator, i, attrSelects)
             attrSelects_.insert(std::pair<unsigned int, Pos>(i->second, i->first));
         foreach_reverse (AttrSelects_::reverse_iterator, i, attrSelects_)

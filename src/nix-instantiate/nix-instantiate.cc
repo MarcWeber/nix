@@ -8,6 +8,7 @@
 #include "util.hh"
 #include "store-api.hh"
 #include "common-opts.hh"
+#include "misc.hh"
 
 #include <map>
 #include <iostream>
@@ -59,6 +60,12 @@ void processExpr(EvalState & state, const Strings & attrPaths,
                 getDerivations(state, v, "", autoArgs, drvs, false);
                 foreach (DrvInfos::iterator, i, drvs) {
                     Path drvPath = i->queryDrvPath(state);
+
+                    /* What output do we want? */
+                    string outputName = i->queryOutputName(state);
+                    if (outputName == "")
+                        throw Error(format("derivation `%1%' lacks an `outputName' attribute ") % drvPath);
+
                     if (gcRoot == "")
                         printGCWarning();
                     else {
@@ -66,7 +73,7 @@ void processExpr(EvalState & state, const Strings & attrPaths,
                         if (++rootNr > 1) rootName += "-" + int2String(rootNr);
                         drvPath = addPermRoot(*store, drvPath, rootName, indirectRoot);
                     }
-                    std::cout << format("%1%\n") % drvPath;
+                    std::cout << format("%1%%2%\n") % drvPath % (outputName != "out" ? "!" + outputName : "");
                 }
             }
         }

@@ -10,8 +10,10 @@
 #include <cctype>
 #include <exception>
 
+#include <sys/time.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <signal.h>
 
 #if HAVE_BOEHMGC
 #include <gc/gc.h>
@@ -47,7 +49,14 @@ void printMissing(StoreAPI & store, const PathSet & paths)
     unsigned long long downloadSize, narSize;
     PathSet willBuild, willSubstitute, unknown;
     queryMissing(store, paths, willBuild, willSubstitute, unknown, downloadSize, narSize);
+    printMissing(willBuild, willSubstitute, unknown, downloadSize, narSize);
+}
 
+
+void printMissing(const PathSet & willBuild,
+    const PathSet & willSubstitute, const PathSet & unknown,
+    unsigned long long downloadSize, unsigned long long narSize)
+{
     if (!willBuild.empty()) {
         printMsg(lvlInfo, format("these derivations will be built:"));
         foreach (PathSet::iterator, i, willBuild)
@@ -92,6 +101,9 @@ string getArg(const string & opt,
 }
 
 
+void detectStackOverflow();
+
+
 /* Initialize and reorder arguments, then call the actual argument
    processor. */
 static void initAndRun(int argc, char * * argv)
@@ -123,10 +135,18 @@ static void initAndRun(int argc, char * * argv)
     if (sigaction(SIGCHLD, &act, 0))
         throw SysError("resetting SIGCHLD");
 
+    /* Register a SIGSEGV handler to detect stack overflows. */
+    detectStackOverflow();
+
     /* There is no privacy in the Nix system ;-)  At least not for
        now.  In particular, store objects should be readable by
        everybody. */
     umask(0022);
+
+    /* Initialise the PRNG. */
+    struct timeval tv;
+    gettimeofday(&tv, 0);
+    srandom(tv.tv_usec);
 
     /* Process the NIX_LOG_TYPE environment variable. */
     string lt = getEnv("NIX_LOG_TYPE");
@@ -155,11 +175,10 @@ static void initAndRun(int argc, char * * argv)
     remaining.clear();
 
     /* Process default options. */
-    int verbosityDelta = lvlInfo;
     for (Strings::iterator i = args.begin(); i != args.end(); ++i) {
         string arg = *i;
-        if (arg == "--verbose" || arg == "-v") verbosityDelta++;
-        else if (arg == "--quiet") verbosityDelta--;
+        if (arg == "--verbose" || arg == "-v") verbosity = (Verbosity) (verbosity + 1);
+        else if (arg == "--quiet") verbosity = verbosity > lvlError ? (Verbosity) (verbosity - 1) : lvlError;
         else if (arg == "--log-type") {
             string s = getArg(arg, i, args.end());
             setLogType(s);
@@ -173,7 +192,7 @@ static void initAndRun(int argc, char * * argv)
             return;
         }
         else if (arg == "--version") {
-            std::cout << format("%1% (Nix) %2%") % programId % NIX_VERSION << std::endl;
+            std::cout << format("%1% (Nix) %2%") % programId % nixVersion << std::endl;
             return;
         }
         else if (arg == "--keep-failed" || arg == "-K")
@@ -205,8 +224,6 @@ static void initAndRun(int argc, char * * argv)
         }
         else remaining.push_back(arg);
     }
-
-    verbosity = (Verbosity) (verbosityDelta < 0 ? 0 : verbosityDelta);
 
     settings.update();
 

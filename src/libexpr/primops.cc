@@ -185,8 +185,8 @@ static void prim_genericClosure(EvalState & state, Value * * args, Value & v)
     list<Value> res;
     set<Value, CompareValues> doneKeys; // !!! use Value *?
     while (!workSet.empty()) {
-	Value * e = *(workSet.begin());
-	workSet.pop_front();
+        Value * e = *(workSet.begin());
+        workSet.pop_front();
 
         state.forceAttrs(*e);
 
@@ -312,16 +312,22 @@ static void prim_derivationStrict(EvalState & state, Value * * args, Value & v)
         throw EvalError("required attribute `name' missing");
     string drvName;
     Pos & posDrvName(*attr->pos);
-    try {        
+    try {
         drvName = state.forceStringNoCtx(*attr->value);
     } catch (Error & e) {
         e.addPrefix(format("while evaluating the derivation attribute `name' at %1%:\n") % posDrvName);
         throw;
     }
-    
+
+    /* Check whether null attributes should be ignored. */
+    bool ignoreNulls = false;
+    attr = args[0]->attrs->find(state.sIgnoreNulls);
+    if (attr != args[0]->attrs->end())
+        ignoreNulls = state.forceBool(*attr->value);
+
     /* Build the derivation expression by processing the attributes. */
     Derivation drv;
-    
+
     PathSet context;
 
     string outputHash, outputHashAlgo;
@@ -331,10 +337,16 @@ static void prim_derivationStrict(EvalState & state, Value * * args, Value & v)
     outputs.insert("out");
 
     foreach (Bindings::iterator, i, *args[0]->attrs) {
+        if (i->name == state.sIgnoreNulls) continue;
         string key = i->name;
         startNest(nest, lvlVomit, format("processing attribute `%1%'") % key);
 
         try {
+
+            if (ignoreNulls) {
+                state.forceValue(*i->value);
+                if (i->value->type == tNull) continue;
+            }
 
             /* The `args' attribute is special: it supplies the
                command-line arguments to the builder. */
@@ -360,7 +372,7 @@ static void prim_derivationStrict(EvalState & state, Value * * args, Value & v)
                 else if (key == "outputHash") outputHash = s;
                 else if (key == "outputHashAlgo") outputHashAlgo = s;
                 else if (key == "outputHashMode") {
-                    if (s == "recursive") outputHashRecursive = true; 
+                    if (s == "recursive") outputHashRecursive = true;
                     else if (s == "flat") outputHashRecursive = false;
                     else throw EvalError(format("invalid value `%1%' for `outputHashMode' attribute") % s);
                 }
@@ -392,13 +404,13 @@ static void prim_derivationStrict(EvalState & state, Value * * args, Value & v)
             throw;
         }
     }
-    
+
     /* Everything in the context of the strings in the derivation
        attributes should be added as dependencies of the resulting
        derivation. */
     foreach (PathSet::iterator, i, context) {
         Path path = *i;
-        
+
         /* Paths marked with `=' denote that the path of a derivation
            is explicitly passed to the builder.  Since that allows the
            builder to gain access to every path in the dependency
@@ -435,7 +447,7 @@ static void prim_derivationStrict(EvalState & state, Value * * args, Value & v)
         else
             drv.inputSrcs.insert(path);
     }
-            
+
     /* Do we have all required attributes? */
     if (drv.builder == "")
         throw EvalError("required attribute `builder' missing");
@@ -452,14 +464,14 @@ static void prim_derivationStrict(EvalState & state, Value * * args, Value & v)
         /* Handle fixed-output derivations. */
         if (outputs.size() != 1 || *(outputs.begin()) != "out")
             throw Error("multiple outputs are not supported in fixed-output derivations");
-        
+
         HashType ht = parseHashType(outputHashAlgo);
         if (ht == htUnknown)
             throw EvalError(format("unknown hash algorithm `%1%'") % outputHashAlgo);
         Hash h = parseHash16or32(ht, outputHash);
         outputHash = printHash(h);
         if (outputHashRecursive) outputHashAlgo = "r:" + outputHashAlgo;
-        
+
         Path outPath = makeFixedOutputPath(outputHashRecursive, ht, h, drvName);
         drv.env["out"] = outPath;
         drv.outputs["out"] = DerivationOutput(outPath, outputHashAlgo, outputHash);
@@ -479,7 +491,7 @@ static void prim_derivationStrict(EvalState & state, Value * * args, Value & v)
         /* Use the masked derivation expression to compute the output
            path. */
         Hash h = hashDerivationModulo(*store, drv);
-        
+
         foreach (DerivationOutputs::iterator, i, drv.outputs)
             if (i->second.path == "") {
                 Path outPath = makeOutputPath(i->first, h, drvName);
@@ -1053,15 +1065,22 @@ static void prim_filter(EvalState & state, Value * * args, Value & v)
     Value * vs[args[1]->list.length];
     unsigned int k = 0;
 
+    bool same = true;
     for (unsigned int n = 0; n < args[1]->list.length; ++n) {
         Value res;
         state.callFunction(*args[0], *args[1]->list.elems[n], res);
         if (state.forceBool(res))
             vs[k++] = args[1]->list.elems[n];
+        else
+            same = false;
     }
 
-    state.mkList(v, k);
-    for (unsigned int n = 0; n < k; ++n) v.list.elems[n] = vs[n];
+    if (same)
+        v = *args[1];
+    else {
+        state.mkList(v, k);
+        for (unsigned int n = 0; n < k; ++n) v.list.elems[n] = vs[n];
+    }
 }
 
 
@@ -1120,7 +1139,7 @@ static void prim_mul(EvalState & state, Value * * args, Value & v)
 
 static void prim_div(EvalState & state, Value * * args, Value & v)
 {
-    int i2 = state.forceInt(*args[1]);
+    NixInt i2 = state.forceInt(*args[1]);
     if (i2 == 0) throw EvalError("division by zero");
     mkInt(v, state.forceInt(*args[0]) / i2);
 }
@@ -1128,7 +1147,10 @@ static void prim_div(EvalState & state, Value * * args, Value & v)
 
 static void prim_lessThan(EvalState & state, Value * * args, Value & v)
 {
-    mkBool(v, state.forceInt(*args[0]) < state.forceInt(*args[1]));
+    state.forceValue(*args[0]);
+    state.forceValue(*args[1]);
+    CompareValues comp;
+    mkBool(v, comp(*args[0], *args[1]));
 }
 
 
@@ -1203,6 +1225,21 @@ static void prim_unsafeDiscardOutputDependency(EvalState & state, Value * * args
 }
 
 
+/* Return the cryptographic hash of a string in base-16. */
+static void prim_hashString(EvalState & state, Value * * args, Value & v)
+{
+    string type = state.forceStringNoCtx(*args[0]);
+    HashType ht = parseHashType(type);
+    if (ht == htUnknown)
+      throw Error(format("unknown hash type `%1%'") % type);
+
+    PathSet context; // discarded
+    string s = state.forceString(*args[1], context);
+
+    mkString(v, printHash(hashString(ht, s)), context);
+};
+
+
 /*************************************************************
  * Versions
  *************************************************************/
@@ -1257,6 +1294,16 @@ void EvalState::createBaseEnv()
 
     mkString(v, settings.thisSystem.c_str());
     addConstant("__currentSystem", v);
+
+    mkString(v, nixVersion.c_str());
+    addConstant("__nixVersion", v);
+
+    /* Language version.  This should be increased every time a new
+       language feature gets added.  It's not necessary to increase it
+       when primops get added, because you can just use `builtins ?
+       primOp' to check. */
+    mkInt(v, 1);
+    addConstant("__langVersion", v);
 
     // Miscellaneous
     addPrimOp("import", 1, prim_import);
@@ -1323,6 +1370,7 @@ void EvalState::createBaseEnv()
     addPrimOp("__stringLength", 1, prim_stringLength);
     addPrimOp("__unsafeDiscardStringContext", 1, prim_unsafeDiscardStringContext);
     addPrimOp("__unsafeDiscardOutputDependency", 1, prim_unsafeDiscardOutputDependency);
+    addPrimOp("__hashString", 2, prim_hashString);
 
     // Versions
     addPrimOp("__parseDrvName", 1, prim_parseDrvName);

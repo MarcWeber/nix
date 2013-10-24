@@ -15,7 +15,7 @@ on to a more in-depth look at the Nix expression language.</para>
 For more extensive information on adding packages to the Nix Packages
 collection (such as functions in the standard environment and coding
 conventions), please consult <link
-xlink:href="http://hydra.nixos.org/job/nixpkgs/trunk/tarball/latest/download-by-type/doc/manual">its
+xlink:href="http://nixos.org/nixpkgs/manual/">its
 manual</link>.</para></note>
 
 
@@ -701,7 +701,7 @@ configureFlags = "
     number of spaces equal to the minimal indentation of the string as
     a whole (disregarding the indentation of empty lines).  For
     instance, the first and second line are indented two space, while
-    the third line is indented three spaces.  Thus, two spaces are
+    the third line is indented four spaces.  Thus, two spaces are
     stripped from each line, so the resulting string is
 
 <programlisting>
@@ -714,18 +714,18 @@ configureFlags = "
     text on the initial line.</para>
 
     <para>Antiquotation
-    (<literal>${<replaceable>expr</replaceable>}}</literal>) is
+    (<literal>${<replaceable>expr</replaceable>}</literal>) is
     supported in indented strings.</para>
 
     <para>Since <literal>${</literal> and <literal>''</literal> have
     special meaning in indented strings, you need a way to quote them.
     <literal>${</literal> can be escaped by prefixing it with
-    <literal>''</literal>, i.e., <literal>''${</literal>.
-    <literal>''</literal> can be escaped by prefixing it with
-    <literal>'</literal>, i.e., <literal>'''</literal>.  Finally,
-    linefeed, carriage-return and tab characters can be written as
-    <literal>''\n</literal>, <literal>''\r</literal>,
-    <literal>''\t</literal>.</para>
+    <literal>''</literal> (that is, two single quotes), i.e.,
+    <literal>''${</literal>.  <literal>''</literal> can be escaped by
+    prefixing it with <literal>'</literal>, i.e.,
+    <literal>'''</literal>.  Finally, linefeed, carriage-return and
+    tab characters can be written as <literal>''\n</literal>,
+    <literal>''\r</literal>, <literal>''\t</literal>.</para>
 
     <para>Indented strings are primarily useful in that they allow
     multi-line string literals to follow the indentation of the
@@ -827,7 +827,7 @@ by a semicolon.  For example:
 }</programlisting>
 
 This defines an attribute set with attributes named
-<varname>x</varname>, <varname>test</varname>, <varname>y</varname>.
+<varname>x</varname>, <varname>text</varname>, <varname>y</varname>.
 The order of the attributes is irrelevant.  An attribute name may only
 occur once.</para>
 

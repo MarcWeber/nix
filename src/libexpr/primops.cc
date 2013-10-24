@@ -37,7 +37,7 @@ std::pair<string, string> decodeContext(const string & s)
 
 
 /* Load and evaluate an expression from path specified by the
-   argument. */ 
+   argument. */
 static void prim_import(EvalState & state, Value * * args, Value & v)
 {
     PathSet context;
@@ -56,7 +56,7 @@ static void prim_import(EvalState & state, Value * * args, Value & v)
                 unsigned long long downloadSize, narSize;
                 queryMissing(*store, singleton<PathSet>(ctx),
                     willBuild, willSubstitute, unknown, downloadSize, narSize);
-                  
+
                 /* !!! If using a substitute, we only need to fetch
                    the selected output of this derivation. */
                 store->buildPaths(singleton<PathSet>(ctx));
@@ -82,14 +82,37 @@ static void prim_import(EvalState & state, Value * * args, Value & v)
         }
         w.attrs->sort();
         Value fun;
-        state.mkThunk_(fun,
-            state.parseExprFromFile(state.findFile("nix/imported-drv-to-derivation.nix")));
+        state.evalFile(state.findFile("nix/imported-drv-to-derivation.nix"), fun);
         state.forceFunction(fun);
         mkApp(v, fun, w);
         state.forceAttrs(v);
     } else {
         state.evalFile(path, v);
     }
+}
+
+
+/* Return a string representing the type of the expression. */
+static void prim_typeOf(EvalState & state, Value * * args, Value & v)
+{
+    state.forceValue(*args[0]);
+    string t;
+    switch (args[0]->type) {
+        case tInt: t = "int"; break;
+        case tBool: t = "bool"; break;
+        case tString: t = "string"; break;
+        case tPath: t = "path"; break;
+        case tNull: t = "null"; break;
+        case tAttrs: t = "attrs"; break;
+        case tList: t = "list"; break;
+        case tLambda:
+        case tPrimOp:
+        case tPrimOpApp:
+            t = "lambda";
+            break;
+        default: abort();
+    }
+    mkString(v, state.symbols.create(t));
 }
 
 
@@ -109,7 +132,7 @@ static void prim_isFunction(EvalState & state, Value * * args, Value & v)
 }
 
 
-/* Determine whether the argument is an Int. */
+/* Determine whether the argument is an integer. */
 static void prim_isInt(EvalState & state, Value * * args, Value & v)
 {
     state.forceValue(*args[0]);
@@ -117,7 +140,7 @@ static void prim_isInt(EvalState & state, Value * * args, Value & v)
 }
 
 
-/* Determine whether the argument is an String. */
+/* Determine whether the argument is a string. */
 static void prim_isString(EvalState & state, Value * * args, Value & v)
 {
     state.forceValue(*args[0]);
@@ -125,7 +148,7 @@ static void prim_isString(EvalState & state, Value * * args, Value & v)
 }
 
 
-/* Determine whether the argument is an Bool. */
+/* Determine whether the argument is a Boolean. */
 static void prim_isBool(EvalState & state, Value * * args, Value & v)
 {
     state.forceValue(*args[0]);
@@ -197,7 +220,7 @@ static void prim_genericClosure(EvalState & state, Value * * args, Value & v)
         if (doneKeys.find(*key->value) != doneKeys.end()) continue;
         doneKeys.insert(*key->value);
         res.push_back(*e);
-        
+
         /* Call the `operator' function with `e' as argument. */
         Value call;
         mkApp(call, *op->value, *e);
@@ -247,7 +270,7 @@ static void prim_addErrorContext(EvalState & state, Value * * args, Value & v)
 }
 
 
-/* Try evaluating the argument. Success => {success=true; value=something;}, 
+/* Try evaluating the argument. Success => {success=true; value=something;},
  * else => {success=false; value=false;} */
 static void prim_tryEval(EvalState & state, Value * * args, Value & v)
 {
@@ -395,10 +418,8 @@ static void prim_derivationStrict(EvalState & state, Value * * args, Value & v)
             }
 
         } catch (Error & e) {
-            e.addPrefix(format("while evaluating the derivation attribute `%1%' at %2%:\n")
-                % key % *i->pos);
-            e.addPrefix(format("while instantiating the derivation named `%1%' at %2%:\n")
-                % drvName % posDrvName);
+            e.addPrefix(format("while evaluating the attribute `%1%' of the derivation `%2%' at %3%:\n")
+                % key % drvName % posDrvName);
             throw;
         }
     }
@@ -634,7 +655,7 @@ static void prim_toFile(EvalState & state, Value * * args, Value & v)
             throw EvalError(format("in `toFile': the file `%1%' cannot refer to derivation outputs") % name);
         refs.insert(path);
     }
-    
+
     Path storePath = settings.readOnlyMode
         ? computeStorePathForText(name, contents, refs)
         : store->addTextToStore(name, contents, refs, state.repair);
@@ -651,7 +672,7 @@ struct FilterFromExpr : PathFilter
 {
     EvalState & state;
     Value & filter;
-    
+
     FilterFromExpr(EvalState & state, Value & filter)
         : state(state), filter(filter)
     {
@@ -672,12 +693,12 @@ struct FilterFromExpr : PathFilter
         state.callFunction(filter, arg1, fun2);
 
         Value arg2;
-        mkString(arg2, 
+        mkString(arg2,
             S_ISREG(st.st_mode) ? "regular" :
             S_ISDIR(st.st_mode) ? "directory" :
             S_ISLNK(st.st_mode) ? "symlink" :
             "unknown" /* not supported, will fail! */);
-        
+
         Value res;
         state.callFunction(fun2, arg2, res);
 
@@ -801,12 +822,12 @@ static void prim_listToAttrs(EvalState & state, Value * * args, Value & v)
     for (unsigned int i = 0; i < args[0]->list.length; ++i) {
         Value & v2(*args[0]->list.elems[i]);
         state.forceAttrs(v2);
-        
+
         Bindings::iterator j = v2.attrs->find(state.sName);
         if (j == v2.attrs->end())
             throw TypeError("`name' attribute missing in a call to `listToAttrs'");
         string name = state.forceStringNoCtx(*j->value);
-        
+
         Bindings::iterator j2 = v2.attrs->find(state.symbols.create("value"));
         if (j2 == v2.attrs->end())
             throw TypeError("`value' attribute missing in a call to `listToAttrs'");
@@ -830,7 +851,7 @@ static void prim_intersectAttrs(EvalState & state, Value * * args, Value & v)
 {
     state.forceAttrs(*args[0]);
     state.forceAttrs(*args[1]);
-        
+
     state.mkAttrs(v, std::min(args[0]->attrs->size(), args[1]->attrs->size()));
 
     foreach (Bindings::iterator, i, *args[0]->attrs) {
@@ -933,7 +954,7 @@ static void prim_map(EvalState & state, Value * * args, Value & v)
     state.mkList(v, args[1]->list.length);
 
     for (unsigned int n = 0; n < v.list.length; ++n)
-        mkApp(*(v.list.elems[n] = state.allocValue()), 
+        mkApp(*(v.list.elems[n] = state.allocValue()),
             *args[0], *args[1]->list.elems[n]);
 }
 
@@ -1105,7 +1126,7 @@ static void prim_unsafeDiscardOutputDependency(EvalState & state, Value * * args
         if (p.at(0) == '=') p = "~" + string(p, 1);
         context2.insert(p);
     }
-    
+
     mkString(v, s, context2);
 }
 
@@ -1167,10 +1188,10 @@ void EvalState::createBaseEnv()
 
     mkBool(v, true);
     addConstant("true", v);
-    
+
     mkBool(v, false);
     addConstant("false", v);
-    
+
     v.type = tNull;
     addConstant("null", v);
 
@@ -1192,6 +1213,7 @@ void EvalState::createBaseEnv()
 
     // Miscellaneous
     addPrimOp("import", 1, prim_import);
+    addPrimOp("__typeOf", 1, prim_typeOf);
     addPrimOp("isNull", 1, prim_isNull);
     addPrimOp("__isFunction", 1, prim_isFunction);
     addPrimOp("__isString", 1, prim_isString);
@@ -1263,7 +1285,9 @@ void EvalState::createBaseEnv()
 
     /* Add a wrapper around the derivation primop that computes the
        `drvPath' and `outPath' attributes lazily. */
-    mkThunk_(v, parseExprFromFile(findFile("nix/derivation.nix")));
+    string path = findFile("nix/derivation.nix");
+    sDerivationNix = symbols.create(path);
+    evalFile(path, v);
     addConstant("derivation", v);
 
     /* Now that we've added all primops, sort the `builtins' attribute

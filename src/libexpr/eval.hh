@@ -88,23 +88,21 @@ struct EvalState;
 std::ostream & operator << (std::ostream & str, const Value & v);
 
 
-class EvalState 
+class EvalState
 {
 public:
     SymbolTable symbols;
 
     const Symbol sWith, sOutPath, sDrvPath, sType, sMeta, sName,
         sSystem, sOverrides, sOutputs, sOutputName, sIgnoreNulls;
+    Symbol sDerivationNix;
 
     /* If set, force copying files to the Nix store even if they
        already exist there. */
     bool repair;
 
 private:
-    SrcToStore srcToStore; 
-
-    /* A cache from path names to parse trees. */
-    std::map<Path, Expr *> parseTrees;
+    SrcToStore srcToStore;
 
     /* A cache from path names to values. */
 #if HAVE_BOEHMGC
@@ -119,22 +117,24 @@ private:
     SearchPath::iterator searchPathInsertionPoint;
 
 public:
-    
+
     EvalState();
     ~EvalState();
 
     void addToSearchPath(const string & s);
 
-    /* Parse a Nix expression from the specified file.  If `path'
-       refers to a directory, then "/default.nix" is appended. */
-    Expr * parseExprFromFile(Path path);
+    /* Parse a Nix expression from the specified file. */
+    Expr * parseExprFromFile(const Path & path);
 
     /* Parse a Nix expression from the specified string. */
+    Expr * parseExprFromString(const string & s, const Path & basePath, StaticEnv & staticEnv);
     Expr * parseExprFromString(const string & s, const Path & basePath);
-    
+
     /* Evaluate an expression read from the given file to normal
        form. */
     void evalFile(const Path & path, Value & v);
+
+    void resetFileCache();
 
     /* Look up a file in the search path. */
     Path findFile(const string & path);
@@ -184,23 +184,21 @@ public:
        path.  Nothing is copied to the store. */
     Path coerceToPath(Value & v, PathSet & context);
 
-private:
+public:
 
     /* The base environment, containing the builtin functions and
        values. */
     Env & baseEnv;
 
-    unsigned int baseEnvDispl;
-
-public:
-    
     /* The same, but used during parsing to resolve variables. */
     StaticEnv staticBaseEnv; // !!! should be private
 
 private:
-    
+
+    unsigned int baseEnvDispl;
+
     void createBaseEnv();
-    
+
     void addConstant(const string & name, Value & v);
 
     void addPrimOp(const string & name,
@@ -208,17 +206,23 @@ private:
 
     string showTypeOrXml(Value &v);
 
-    inline Value * lookupVar(Env * env, const VarRef & var, bool noEval);
-    
+public:
+
+    void getBuiltin(const string & name, Value & v);
+
+private:
+
+    inline Value * lookupVar(Env * env, const ExprVar & var, bool noEval);
+
     friend class ExprVar;
     friend class ExprAttrs;
     friend class ExprLet;
 
-    Expr * parse(const char * text,
-        const Path & path, const Path & basePath);
+    Expr * parse(const char * text, const Path & path,
+        const Path & basePath, StaticEnv & staticEnv);
 
 public:
-    
+
     /* Do a deep equality test between two values.  That is, list
        elements and attributes are compared recursively. */
     bool eqValues(Value & v1, Value & v2);
@@ -228,7 +232,7 @@ public:
     /* Automatically call a function for which each argument has a
        default value or has a binding in the `args' map. */
     void autoCallFunction(Bindings & args, Value & fun, Value & res);
-    
+
     /* Allocation primitives. */
     Value * allocValue();
     Env & allocEnv(unsigned int size);
@@ -277,6 +281,10 @@ private:
 
 /* Return a string representing the type of the value `v'. */
 string showType(const Value & v);
+
+
+/* If `path' refers to a directory, then append "/default.nix". */
+Path resolveExprPath(Path path);
 
 
 }

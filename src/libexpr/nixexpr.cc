@@ -38,7 +38,7 @@ void ExprPath::show(std::ostream & str)
 
 void ExprVar::show(std::ostream & str)
 {
-    str << info.name;
+    str << name;
 }
 
 void ExprSelect::show(std::ostream & str)
@@ -174,7 +174,7 @@ void ExprPath::bindVars(const StaticEnv & env)
 {
 }
 
-void VarRef::bind(const StaticEnv & env)
+void ExprVar::bindVars(const StaticEnv & env)
 {
     /* Check whether the variable appears in the environment.  If so,
        set its level and displacement. */
@@ -198,15 +198,10 @@ void VarRef::bind(const StaticEnv & env)
     /* Otherwise, the variable must be obtained from the nearest
        enclosing `with'.  If there is no `with', then we can issue an
        "undefined variable" error now. */
-    if (withLevel == -1) throw EvalError(format("undefined variable `%1%'") % name);
+    if (withLevel == -1) throw UndefinedVarError(format("undefined variable `%1%' at %2%") % name % pos);
 
     fromWith = true;
     this->level = withLevel;
-}
-
-void ExprVar::bindVars(const StaticEnv & env)
-{
-    info.bind(env);
 }
 
 void ExprSelect::bindVars(const StaticEnv & env)
@@ -224,11 +219,11 @@ void ExprAttrs::bindVars(const StaticEnv & env)
 {
     if (recursive) {
         StaticEnv newEnv(false, &env);
-    
+
         unsigned int displ = 0;
         foreach (AttrDefs::iterator, i, attrs)
             newEnv.vars[i->first] = i->second.displ = displ++;
-        
+
         foreach (AttrDefs::iterator, i, attrs)
             i->second.e->bindVars(i->second.inherited ? env : newEnv);
     }
@@ -247,9 +242,9 @@ void ExprList::bindVars(const StaticEnv & env)
 void ExprLambda::bindVars(const StaticEnv & env)
 {
     StaticEnv newEnv(false, &env);
-    
+
     unsigned int displ = 0;
-    
+
     if (!arg.empty()) newEnv.vars[arg] = displ++;
 
     if (matchAttrs) {
@@ -266,14 +261,14 @@ void ExprLambda::bindVars(const StaticEnv & env)
 void ExprLet::bindVars(const StaticEnv & env)
 {
     StaticEnv newEnv(false, &env);
-    
+
     unsigned int displ = 0;
     foreach (ExprAttrs::AttrDefs::iterator, i, attrs->attrs)
         newEnv.vars[i->first] = i->second.displ = displ++;
-    
+
     foreach (ExprAttrs::AttrDefs::iterator, i, attrs->attrs)
         i->second.e->bindVars(i->second.inherited ? env : newEnv);
-    
+
     body->bindVars(newEnv);
 }
 
@@ -290,8 +285,8 @@ void ExprWith::bindVars(const StaticEnv & env)
             prevWith = level;
             break;
         }
-    
-    attrs->bindVars(env);    
+
+    attrs->bindVars(env);
     StaticEnv newEnv(true, &env);
     body->bindVars(newEnv);
 }
@@ -338,6 +333,18 @@ void ExprLambda::setName(Symbol & name)
 string ExprLambda::showNamePos()
 {
     return (format("%1% at %2%") % (name.set() ? "`" + (string) name + "'" : "an anonymous function") % pos).str();
+}
+
+
+
+/* Symbol table. */
+
+size_t SymbolTable::totalSize() const
+{
+    size_t n = 0;
+    foreach (Symbols::const_iterator, i, symbols)
+        n += i->size();
+    return n;
 }
 
 

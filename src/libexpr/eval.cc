@@ -117,7 +117,7 @@ string showType(const Value & v)
         case tString: return "a string";
         case tPath: return "a path";
         case tNull: return "null";
-        case tAttrs: return "an attribute set";
+        case tAttrs: return "a set";
         case tList: return "a list";
         case tThunk: return "a thunk";
         case tApp: return "a function application";
@@ -501,7 +501,7 @@ inline void EvalState::evalAttrs(Env & env, Expr * e, Value & v)
 {
     e->eval(*this, env, v);
     if (v.type != tAttrs)
-        throwTypeError("value is %1% while an attribute set was expected", showTypeOrXml(v));
+        throwTypeError("value is %1% while a set was expected", showTypeOrXml(v));
 }
 
 
@@ -911,9 +911,8 @@ void ExprOpUpdate::eval(EvalState & state, Env & env, Value & v)
 
     state.mkAttrs(v, v1.attrs->size() + v2.attrs->size());
 
-    /* Merge the attribute sets, preferring values from the second
-       set.  Make sure to keep the resulting vector in sorted
-       order. */
+    /* Merge the sets, preferring values from the second set.  Make
+       sure to keep the resulting vector in sorted order. */
     Bindings::iterator i = v1.attrs->begin();
     Bindings::iterator j = v2.attrs->begin();
 
@@ -1139,7 +1138,7 @@ string EvalState::coerceToString(Value & v, PathSet & context,
     if (v.type == tAttrs) {
         Bindings::iterator i = v.attrs->find(sOutPath);
         if (i == v.attrs->end())
-            throwTypeError("cannot coerce an attribute set: %1% (except a derivation) to a string", showTypeOrXml(v));
+            throwTypeError("cannot coerce a set to a string: %1%", showTypeOrXml(v));
         return coerceToString(*i->value, context, coerceMore, copyToStore);
     }
 
@@ -1185,9 +1184,8 @@ bool EvalState::eqValues(Value & v1, Value & v2)
     forceValue(v2);
 
     /* !!! Hack to support some old broken code that relies on pointer
-       equality tests between attribute sets.  (Specifically,
-       builderDefs calls uniqList on a list of attribute sets.)  Will
-       remove this eventually. */
+       equality tests between sets.  (Specifically, builderDefs calls
+       uniqList on a list of sets.)  Will remove this eventually. */
     if (&v1 == &v2) return true;
 
     if (v1.type != v2.type) return false;
@@ -1225,8 +1223,8 @@ bool EvalState::eqValues(Value & v1, Value & v2)
             return true;
 
         case tAttrs: {
-            /* If both attribute sets denote a derivation (type =
-               "derivation"), then compare their outPaths. */
+            /* If both sets denote a derivation (type = "derivation"),
+               then compare their outPaths. */
             if (isDerivation(v1) && isDerivation(v2)) {
                 Bindings::iterator i = v1.attrs->find(sOutPath);
                 Bindings::iterator j = v2.attrs->find(sOutPath);
@@ -1276,7 +1274,7 @@ void EvalState::printStats()
     printMsg(v, format("  list concatenations: %1%") % nrListConcats);
     printMsg(v, format("  values allocated: %1% (%2% bytes)")
         % nrValues % (nrValues * sizeof(Value)));
-    printMsg(v, format("  attribute sets allocated: %1%") % nrAttrsets);
+    printMsg(v, format("  sets allocated: %1%") % nrAttrsets);
     printMsg(v, format("  right-biased unions: %1%") % nrOpUpdates);
     printMsg(v, format("  values copied in right-biased unions: %1%") % nrOpUpdateValuesCopied);
     printMsg(v, format("  symbols in symbol table: %1%") % symbols.size());

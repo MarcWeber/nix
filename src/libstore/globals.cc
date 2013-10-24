@@ -129,6 +129,7 @@ void Settings::update()
     get(tryFallback, "build-fallback");
     get(maxBuildJobs, "build-max-jobs");
     get(buildCores, "build-cores");
+    get(xmldebugCorecionFailure, "xml-debug-corecion-failure");
     get(thisSystem, "system");
     get(maxSilentTime, "build-max-silent-time");
     get(buildTimeout, "build-timeout");

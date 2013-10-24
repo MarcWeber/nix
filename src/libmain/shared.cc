@@ -216,7 +216,7 @@ static void initAndRun(int argc, char * * argv)
         else if (arg == "--show-trace")
             showTrace = true;
         else if (arg == "--xml-debug-coercion-failure") {
-            settings.set("xmldebugCorecionFailure", "true");
+            settings.set("xml-debug-corecion-failure", "true");
         }
         else if (arg == "--option") {
             ++i; if (i == args.end()) throw UsageError("`--option' requires two arguments");

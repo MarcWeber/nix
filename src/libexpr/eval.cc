@@ -501,7 +501,15 @@ inline void EvalState::evalAttrs(Env & env, Expr * e, Value & v)
 {
     e->eval(*this, env, v);
     if (v.type != tAttrs)
+<<<<<<< HEAD
         throwTypeError("value is %1% while a set was expected", showTypeOrXml(v));
+=======
+<<<<<<< HEAD
+        throwTypeError("value is %1% while an attribute set was expected", showTypeOrXml(v));
+=======
+        throwTypeError("value is %1% while a set was expected", showType(v));
+>>>>>>> refs/top-bases/experimental/debug-coercions-as-xml
+>>>>>>> experimental/debug-coercions-as-xml
 }
 
 

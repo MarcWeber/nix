@@ -5,10 +5,74 @@
 <title>Nix Release Notes</title>
 
 
+<!--==================================================================-->
+
+<section xml:id="ssec-relnotes-1.6.1"><title>Release 1.6.1 (TBA)</title>
+
+<para>This is primarily a bug fix release.  Changes of interest
+are:</para>
+
+<itemizedlist>
+
+  <listitem>
+    <para>Nix 1.6 accidentally changed the semantics of antiquoted
+    paths in strings, such as <literal>"${/foo}/bar"</literal>.  This
+    release reverts to the Nix 1.5.3 behaviour.</para>
+  </listitem>
+
+  <listitem>
+    <para>Previously, Nix optimised expressions such as
+    <literal>"${<replaceable>expr</replaceable>}"</literal> to
+    <replaceable>expr</replaceable>.  Thus it neither checked whether
+    <replaceable>expr</replaceable> could be coerced to a string, nor
+    applied such coercions.  This meant that
+    <literal>"${123}"</literal> evaluatued to <literal>123</literal>,
+    and <literal>"${./foo}"</literal> evaluated to
+    <literal>./foo</literal> (even though
+    <literal>"${./foo} "</literal> evaluates to
+    <literal>"/nix/store/<replaceable>hash</replaceable>-foo "</literal>).
+    Nix now checks the type of antiquoted expressions and
+    applies coercions.</para>
+  </listitem>
+
+  <listitem>
+    <para>Nix now shows the exact position of undefined variables.  In
+    particular, undefined variable errors in a <literal>with</literal>
+    previously didn't show <emphasis>any</emphasis> position
+    information, so this makes it a lot easier to fix such
+    errors.</para>
+  </listitem>
+
+  <listitem>
+    <para>Undefined variables are now treated consistently.
+    Previously, the <function>tryEval</function> function would catch
+    undefined variables inside a <literal>with</literal> but not
+    outside.  Now <function>tryEval</function> never catches undefined
+    variables.</para>
+  </listitem>
+
+  <listitem>
+    <para>Bash completion in <command>nix-shell</command> now works
+    correctly.</para>
+  </listitem>
+
+  <listitem>
+    <para>Stack traces are less verbose: they no longer show calls to
+    builtin functions and only show a single line for each derivation
+    on the call stack.</para>
+  </listitem>
+
+</itemizedlist>
+
+</section>
+
 
 <!--==================================================================-->
 
-<section xml:id="ssec-relnotes-1.6.0"><title>Release 1.6.0 (TBA)</title>
+<section xml:id="ssec-relnotes-1.6.0"><title>Release 1.6 (September 10, 2013)</title>
+
+<para>In addition to the usual bug fixes, this release has several new
+features:</para>
 
 <itemizedlist>
 
@@ -38,7 +102,92 @@
     from your regular shells.</para>
   </listitem>
 
+  <listitem>
+    <para><command>nix-env</command> no longer requires a
+    <literal>*</literal> argument to match all packages, so
+    <literal>nix-env -qa</literal> is equivalent to <literal>nix-env
+    -qa '*'</literal>.</para>
+  </listitem>
+
+  <listitem>
+    <para><command>nix-env -i</command> has a new flag
+    <option>--remove-all</option> (<option>-r</option>) to remove all
+    previous packages from the profile.  This makes it easier to do
+    declarative package management similar to NixOS’s
+    <option>environment.systemPackages</option>.  For instance, if you
+    have a specification <filename>my-packages.nix</filename> like this:
+
+<programlisting>
+with import &lt;nixpkgs> {};
+[ thunderbird
+  geeqie
+  ...
+]
+</programlisting>
+
+    then after any change to this file, you can run:
+
+<screen>
+$ nix-env -f my-packages.nix -ir
+</screen>
+
+    to update your profile to match the specification.</para>
+  </listitem>
+
+  <listitem>
+    <para>The ‘<literal>with</literal>’ language construct is now more
+    lazy.  It only evaluates its argument if a variable might actually
+    refer to an attribute in the argument.  For instance, this now
+    works:
+
+<programlisting>
+let
+  pkgs = with pkgs; { foo = "old"; bar = foo; } // overrides;
+  overrides = { foo = "new"; };
+in pkgs.bar
+</programlisting>
+
+    This evaluates to <literal>"new"</literal>, while previously it
+    gave an “infinite recursion” error.</para>
+  </listitem>
+
+  <listitem>
+    <para>Nix now has proper integer arithmetic operators. For
+    instance, you can write <literal>x + y</literal> instead of
+    <literal>builtins.add x y</literal>, or <literal>x &lt;
+    y</literal> instead of <literal>builtins.lessThan x y</literal>.
+    The comparison operators also work on strings.</para>
+  </listitem>
+
+  <listitem>
+    <para>On 64-bit systems, Nix integers are now 64 bits rather than
+    32 bits.</para>
+  </listitem>
+
+  <listitem>
+    <para>When using the Nix daemon, the <command>nix-daemon</command>
+    worker process now runs on the same CPU as the client, on systems
+    that support setting CPU affinity.  This gives a significant speedup
+    on some systems.</para>
+  </listitem>
+
+  <listitem>
+    <para>If a stack overflow occurs in the Nix evaluator, you now get
+    a proper error message (rather than “Segmentation fault”) on some
+    systems.</para>
+  </listitem>
+
+  <listitem>
+    <para>In addition to directories, you can now bind-mount regular
+    files in chroots through the (now misnamed) option
+    <option>build-chroot-dirs</option>.</para>
+  </listitem>
+
 </itemizedlist>
+
+<para>This release has contributions from Domen Kožar, Eelco Dolstra,
+Florian Friesdorf, Gergely Risko, Ivan Kozik, Ludovic Courtès and Shea
+Levy.</para>
 
 </section>
 

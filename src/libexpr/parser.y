@@ -12,24 +12,24 @@
 %expect-rr 1
 
 %code requires {
-    
+
 #ifndef BISON_HEADER
 #define BISON_HEADER
-    
+
 #include "util.hh"
-    
+
 #include "nixexpr.hh"
 #include "eval.hh"
 
 namespace nix {
 
-    struct ParseData 
+    struct ParseData
     {
         EvalState & state;
         SymbolTable & symbols;
         Expr * result;
         Path basePath;
-        Path path;
+        Symbol path;
         string error;
         Symbol sLetBody;
         ParseData(EvalState & state)
@@ -38,7 +38,7 @@ namespace nix {
             , sLetBody(symbols.create("<let-body>"))
             { };
     };
-    
+
 }
 
 #define YY_DECL int yylex \
@@ -63,14 +63,14 @@ using namespace nix;
 
 
 namespace nix {
-    
+
 
 static void dupAttr(const AttrPath & attrPath, const Pos & pos, const Pos & prevPos)
 {
     throw ParseError(format("attribute `%1%' at %2% already defined at %3%")
         % showAttrPath(attrPath) % pos % prevPos);
 }
- 
+
 
 static void dupAttr(Symbol attr, const Pos & pos, const Pos & prevPos)
 {
@@ -78,7 +78,7 @@ static void dupAttr(Symbol attr, const Pos & pos, const Pos & prevPos)
     throw ParseError(format("attribute `%1%' at %2% already defined at %3%")
         % showAttrPath(attrPath) % pos % prevPos);
 }
- 
+
 
 static void addAttr(ExprAttrs * attrs, AttrPath & attrPath,
     Expr * e, const Pos & pos)
@@ -121,7 +121,7 @@ static void addFormal(const Pos & pos, Formals * formals, const Formal & formal)
 static Expr * stripIndentation(SymbolTable & symbols, vector<Expr *> & es)
 {
     if (es.empty()) return new ExprString(symbols.create(""));
-    
+
     /* Figure out the minimum indentation.  Note that by design
        whitespace-only final lines are not taken into account.  (So
        the " " in "\n ''" is ignored, but the " " in "\n foo''" is.) */
@@ -170,7 +170,7 @@ static Expr * stripIndentation(SymbolTable & symbols, vector<Expr *> & es)
             es2->push_back(*i);
             continue;
         }
-        
+
         string s2;
         for (unsigned int j = 0; j < e->s.size(); ++j) {
             if (atStartOfLine) {
@@ -203,7 +203,8 @@ static Expr * stripIndentation(SymbolTable & symbols, vector<Expr *> & es)
         es2->push_back(new ExprString(symbols.create(s2)));
     }
 
-    return es2->size() == 1 ? (*es2)[0] : new ExprConcatStrings(true, es2);
+    /* If this is a single string, then don't do a concatenation. */
+    return es2->size() == 1 && dynamic_cast<ExprString *>((*es2)[0]) ? (*es2)[0] : new ExprConcatStrings(true, es2);
 }
 
 
@@ -232,7 +233,7 @@ void yyerror(YYLTYPE * loc, yyscan_t scanner, ParseData * data, const char * err
 %}
 
 %union {
-  // !!! We're probably leaking stuff here.  
+  // !!! We're probably leaking stuff here.
   nix::Expr * e;
   nix::ExprList * list;
   nix::ExprAttrs * attrs;
@@ -310,13 +311,13 @@ expr_if
 
 expr_op
   : '!' expr_op %prec NOT { $$ = new ExprOpNot($2); }
-  | '-' expr_op %prec NEGATE { $$ = new ExprApp(new ExprApp(new ExprVar(data->symbols.create("__sub")), new ExprInt(0)), $2); }
+| '-' expr_op %prec NEGATE { $$ = new ExprApp(new ExprApp(new ExprVar(noPos, data->symbols.create("__sub")), new ExprInt(0)), $2); }
   | expr_op EQ expr_op { $$ = new ExprOpEq($1, $3); }
   | expr_op NEQ expr_op { $$ = new ExprOpNEq($1, $3); }
-  | expr_op '<' expr_op { $$ = new ExprApp(new ExprApp(new ExprVar(data->symbols.create("__lessThan")), $1), $3); }
-  | expr_op LEQ expr_op { $$ = new ExprOpNot(new ExprApp(new ExprApp(new ExprVar(data->symbols.create("__lessThan")), $3), $1)); }
-  | expr_op '>' expr_op { $$ = new ExprApp(new ExprApp(new ExprVar(data->symbols.create("__lessThan")), $3), $1); }
-  | expr_op GEQ expr_op { $$ = new ExprOpNot(new ExprApp(new ExprApp(new ExprVar(data->symbols.create("__lessThan")), $1), $3)); }
+  | expr_op '<' expr_op { $$ = new ExprApp(new ExprApp(new ExprVar(noPos, data->symbols.create("__lessThan")), $1), $3); }
+  | expr_op LEQ expr_op { $$ = new ExprOpNot(new ExprApp(new ExprApp(new ExprVar(noPos, data->symbols.create("__lessThan")), $3), $1)); }
+  | expr_op '>' expr_op { $$ = new ExprApp(new ExprApp(new ExprVar(noPos, data->symbols.create("__lessThan")), $3), $1); }
+  | expr_op GEQ expr_op { $$ = new ExprOpNot(new ExprApp(new ExprApp(new ExprVar(noPos, data->symbols.create("__lessThan")), $1), $3)); }
   | expr_op AND expr_op { $$ = new ExprOpAnd($1, $3); }
   | expr_op OR expr_op { $$ = new ExprOpOr($1, $3); }
   | expr_op IMPL expr_op { $$ = new ExprOpImpl($1, $3); }
@@ -328,9 +329,9 @@ expr_op
       l->push_back($3);
       $$ = new ExprConcatStrings(false, l);
     }
-  | expr_op '-' expr_op { $$ = new ExprApp(new ExprApp(new ExprVar(data->symbols.create("__sub")), $1), $3); }
-  | expr_op '*' expr_op { $$ = new ExprApp(new ExprApp(new ExprVar(data->symbols.create("__mul")), $1), $3); }
-  | expr_op '/' expr_op { $$ = new ExprApp(new ExprApp(new ExprVar(data->symbols.create("__div")), $1), $3); }
+  | expr_op '-' expr_op { $$ = new ExprApp(new ExprApp(new ExprVar(noPos, data->symbols.create("__sub")), $1), $3); }
+  | expr_op '*' expr_op { $$ = new ExprApp(new ExprApp(new ExprVar(noPos, data->symbols.create("__mul")), $1), $3); }
+  | expr_op '/' expr_op { $$ = new ExprApp(new ExprApp(new ExprVar(noPos, data->symbols.create("__div")), $1), $3); }
   | expr_op CONCAT expr_op { $$ = new ExprOpConcatLists($1, $3); }
   | expr_app
   ;
@@ -349,17 +350,17 @@ expr_select
   | /* Backwards compatibility: because Nixpkgs has a rarely used
        function named ‘or’, allow stuff like ‘map or [...]’. */
     expr_simple OR_KW
-    { $$ = new ExprApp($1, new ExprVar(data->symbols.create("or"))); }
+    { $$ = new ExprApp($1, new ExprVar(CUR_POS, data->symbols.create("or"))); }
   | expr_simple { $$ = $1; }
   ;
 
 expr_simple
-  : ID { $$ = new ExprVar(data->symbols.create($1)); }
+  : ID { $$ = new ExprVar(CUR_POS, data->symbols.create($1)); }
   | INT { $$ = new ExprInt($1); }
   | '"' string_parts '"' {
       /* For efficiency, and to simplify parse trees a bit. */
       if ($2->empty()) $$ = new ExprString(data->symbols.create(""));
-      else if ($2->size() == 1) $$ = $2->front();
+      else if ($2->size() == 1 && dynamic_cast<ExprString *>($2->front())) $$ = $2->front();
       else $$ = new ExprConcatStrings(true, $2);
   }
   | IND_STRING_OPEN ind_string_parts IND_STRING_CLOSE {
@@ -372,10 +373,10 @@ expr_simple
       /* The file wasn't found in the search path.  However, we can't
          throw an error here, because the expression might never be
          evaluated.  So return an expression that lazily calls
-         ‘abort’. */
+         ‘throw’. */
       $$ = path2 == ""
           ? (Expr * ) new ExprApp(
-              new ExprVar(data->symbols.create("throw")),
+              new ExprVar(noPos, data->symbols.create("throw")),
               new ExprString(data->symbols.create(
                       (format("file `%1%' was not found in the Nix search path (add it using $NIX_PATH or -I)") % path).str())))
           : (Expr * ) new ExprPath(path2);
@@ -413,7 +414,7 @@ binds
           if ($$->attrs.find(*i) != $$->attrs.end())
               dupAttr(*i, makeCurPos(@3, data), $$->attrs[*i].pos);
           Pos pos = makeCurPos(@3, data);
-          $$->attrs[*i] = ExprAttrs::AttrDef(new ExprVar(*i), pos, true);
+          $$->attrs[*i] = ExprAttrs::AttrDef(new ExprVar(CUR_POS, *i), pos, true);
       }
     }
   | binds INHERIT '(' expr ')' attrs ';'
@@ -465,7 +466,7 @@ formal
   : ID { $$ = new Formal(data->symbols.create($1), 0); }
   | ID '?' expr { $$ = new Formal(data->symbols.create($1), $3); }
   ;
-  
+
 %%
 
 
@@ -478,34 +479,30 @@ formal
 
 
 namespace nix {
-      
+
 
 Expr * EvalState::parse(const char * text,
-    const Path & path, const Path & basePath)
+    const Path & path, const Path & basePath, StaticEnv & staticEnv)
 {
     yyscan_t scanner;
     ParseData data(*this);
     data.basePath = basePath;
-    data.path = path;
+    data.path = data.symbols.create(path);
 
     yylex_init(&scanner);
     yy_scan_string(text, scanner);
     int res = yyparse(scanner, &data);
     yylex_destroy(scanner);
-    
+
     if (res) throw ParseError(data.error);
 
-    try {
-        data.result->bindVars(staticBaseEnv);
-    } catch (Error & e) {
-        throw ParseError(format("%1%, in `%2%'") % e.msg() % path);
-    }
-    
+    data.result->bindVars(staticEnv);
+
     return data.result;
 }
 
 
-Expr * EvalState::parseExprFromFile(Path path)
+Path resolveExprPath(Path path)
 {
     assert(path[0] == '/');
 
@@ -523,21 +520,25 @@ Expr * EvalState::parseExprFromFile(Path path)
     if (S_ISDIR(st.st_mode))
         path = canonPath(path + "/default.nix");
 
-    /* Read and parse the input file, unless it's already in the parse
-       tree cache. */
-    Expr * e = parseTrees[path];
-    if (!e) {
-        e = parse(readFile(path).c_str(), path, dirOf(path));
-        parseTrees[path] = e;
-    }
+    return path;
+}
 
-    return e;
+
+Expr * EvalState::parseExprFromFile(const Path & path)
+{
+    return parse(readFile(path).c_str(), path, dirOf(path), staticBaseEnv);
+}
+
+
+Expr * EvalState::parseExprFromString(const string & s, const Path & basePath, StaticEnv & staticEnv)
+{
+    return parse(s.c_str(), "(string)", basePath, staticEnv);
 }
 
 
 Expr * EvalState::parseExprFromString(const string & s, const Path & basePath)
 {
-    return parse(s.c_str(), "(string)", basePath);
+    return parseExprFromString(s, basePath, staticBaseEnv);
 }
 
 
@@ -552,7 +553,7 @@ void EvalState::addToSearchPath(const string & s)
         prefix = string(s, 0, pos);
         path = string(s, pos + 1);
     }
-    
+
     path = absPath(path);
     if (pathExists(path)) {
         debug(format("adding path `%1%' to the search path") % path);
@@ -565,7 +566,7 @@ Path EvalState::findFile(const string & path)
 {
     foreach (SearchPath::iterator, i, searchPath) {
         Path res;
-        if (i->first.empty()) 
+        if (i->first.empty())
             res = i->second + "/" + path;
         else {
             if (path.compare(0, i->first.size(), i->first) != 0 ||

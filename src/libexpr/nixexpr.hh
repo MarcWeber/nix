@@ -16,20 +16,23 @@ MakeError(ThrownError, AssertionError)
 MakeError(Abort, EvalError)
 MakeError(TypeError, EvalError)
 MakeError(ImportError, EvalError) // error building an imported derivation
+MakeError(UndefinedVarError, Error)
 
 
 /* Position objects. */
 
 struct Pos
 {
-    string file;
+    Symbol file;
     unsigned int line, column;
     Pos() : line(0), column(0) { };
-    Pos(const string & file, unsigned int line, unsigned int column)
+    Pos(const Symbol & file, unsigned int line, unsigned int column)
         : file(file), line(line), column(column) { };
     bool operator < (const Pos & p2) const
     {
-        int d = file.compare(p2.file);
+        if (!line) return p2.line;
+        if (!p2.line) return false;
+        int d = ((string) file).compare((string) p2.file);
         if (d < 0) return true;
         if (d > 0) return false;
         if (line < p2.line) return true;
@@ -107,14 +110,15 @@ struct ExprPath : Expr
     Value * maybeThunk(EvalState & state, Env & env);
 };
 
-struct VarRef
+struct ExprVar : Expr
 {
+    Pos pos;
     Symbol name;
 
     /* Whether the variable comes from an environment (e.g. a rec, let
        or function argument) or from a "with". */
     bool fromWith;
-    
+
     /* In the former case, the value is obtained by going `level'
        levels up from the current environment and getting the
        `displ'th value in that environment.  In the latter case, the
@@ -124,15 +128,7 @@ struct VarRef
     unsigned int level;
     unsigned int displ;
 
-    VarRef() { };
-    VarRef(const Symbol & name) : name(name) { };
-    void bind(const StaticEnv & env);
-};
-
-struct ExprVar : Expr
-{
-    VarRef info;
-    ExprVar(const Symbol & name) : info(name) { };
+    ExprVar(const Pos & pos, const Symbol & name) : pos(pos), name(name) { };
     COMMON_METHODS
     Value * maybeThunk(EvalState & state, Env & env);
 };

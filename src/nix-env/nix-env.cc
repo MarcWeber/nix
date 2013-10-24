@@ -54,6 +54,7 @@ struct Globals
     EvalState state;
     bool dryRun;
     bool preserveInstalled;
+    bool removeAll;
     string forceName;
     bool prebuiltOnly;
 };
@@ -94,18 +95,14 @@ static bool parseInstallSourceOptions(Globals & globals,
 }
 
 
-static bool isNixExpr(const Path & path)
+static bool isNixExpr(const Path & path, struct stat & st)
 {
-    struct stat st;
-    if (stat(path.c_str(), &st) == -1)
-        throw SysError(format("getting information about `%1%'") % path);
-
-    return !S_ISDIR(st.st_mode) || pathExists(path + "/default.nix");
+    return S_ISREG(st.st_mode) || (S_ISDIR(st.st_mode) && pathExists(path + "/default.nix"));
 }
 
 
 static void getAllExprs(EvalState & state,
-    const Path & path, ExprAttrs & attrs)
+    const Path & path, StringSet & attrs, Value & v)
 {
     Strings names = readDirectory(path);
     StringSet namesSorted(names.begin(), names.end());
@@ -122,7 +119,7 @@ static void getAllExprs(EvalState & state,
         if (stat(path2.c_str(), &st) == -1)
             continue; // ignore dangling symlinks in ~/.nix-defexpr
 
-        if (isNixExpr(path2)) {
+        if (isNixExpr(path2, st) && (!S_ISREG(st.st_mode) || hasSuffix(path2, ".nix"))) {
             /* Strip off the `.nix' filename suffix (if applicable),
                otherwise the attribute cannot be selected with the
                `-A' option.  Useful if you want to stick a Nix
@@ -130,20 +127,36 @@ static void getAllExprs(EvalState & state,
             string attrName = *i;
             if (hasSuffix(attrName, ".nix"))
                 attrName = string(attrName, 0, attrName.size() - 4);
-            attrs.attrs[state.symbols.create(attrName)] =
-                ExprAttrs::AttrDef(state.parseExprFromFile(absPath(path2)), noPos);
+            if (attrs.find(attrName) != attrs.end()) {
+                printMsg(lvlError, format("warning: name collision in input Nix expressions, skipping `%1%'") % path2);
+                continue;
+            }
+            attrs.insert(attrName);
+            /* Load the expression on demand. */
+            Value & vFun(*state.allocValue());
+            Value & vArg(*state.allocValue());
+            state.getBuiltin("import", vFun);
+            mkString(vArg, path2);
+            mkApp(*state.allocAttr(v, state.symbols.create(attrName)), vFun, vArg);
         }
-        else
+        else if (S_ISDIR(st.st_mode))
             /* `path2' is a directory (with no default.nix in it);
                recurse into it. */
-            getAllExprs(state, path2, attrs);
+            getAllExprs(state, path2, attrs, v);
     }
 }
 
 
-static Expr * loadSourceExpr(EvalState & state, const Path & path)
+static void loadSourceExpr(EvalState & state, const Path & path, Value & v)
 {
-    if (isNixExpr(path)) return state.parseExprFromFile(absPath(path));
+    struct stat st;
+    if (stat(path.c_str(), &st) == -1)
+        throw SysError(format("getting information about `%1%'") % path);
+
+    if (isNixExpr(path, st)) {
+        state.evalFile(path, v);
+        return;
+    }
 
     /* The path is a directory.  Put the Nix expressions in the
        directory in an attribute set, with the file name of each
@@ -151,11 +164,13 @@ static Expr * loadSourceExpr(EvalState & state, const Path & path)
        (but keep the attribute set flat, not nested, to make it easier
        for a user to have a ~/.nix-defexpr directory that includes
        some system-wide directory). */
-    ExprAttrs * attrs = new ExprAttrs;
-    attrs->attrs[state.symbols.create("_combineChannels")] =
-        ExprAttrs::AttrDef(new ExprList(), noPos);
-    getAllExprs(state, path, *attrs);
-    return attrs;
+    if (S_ISDIR(st.st_mode)) {
+        state.mkAttrs(v, 16);
+        state.mkList(*state.allocAttr(v, state.symbols.create("_combineChannels")), 0);
+        StringSet attrs;
+        getAllExprs(state, path, attrs, v);
+        v.attrs->sort();
+    }
 }
 
 
@@ -163,8 +178,10 @@ static void loadDerivations(EvalState & state, Path nixExprPath,
     string systemFilter, Bindings & autoArgs,
     const string & pathPrefix, DrvInfos & elems)
 {
-    Value v;
-    findAlongAttrPath(state, pathPrefix, autoArgs, loadSourceExpr(state, nixExprPath), v);
+    Value vRoot;
+    loadSourceExpr(state, nixExprPath, vRoot);
+
+    Value & v(*findAlongAttrPath(state, pathPrefix, autoArgs, vRoot));
 
     getDerivations(state, v, pathPrefix, autoArgs, elems, true);
 
@@ -227,13 +244,13 @@ static DrvInfos filterBySelector(EvalState & state, const DrvInfos & allElems,
     const Strings & args, bool newestOnly)
 {
     DrvNames selectors = drvNamesFromArgs(args);
+    if (selectors.empty())
+        selectors.push_back(DrvName("*"));
 
     DrvInfos elems;
     set<unsigned int> done;
 
-    for (DrvNames::iterator i = selectors.begin();
-         i != selectors.end(); ++i)
-    {
+    foreach (DrvNames::iterator, i, selectors) {
         typedef list<std::pair<DrvInfo, unsigned int> > Matches;
         Matches matches;
         unsigned int n = 0;
@@ -305,8 +322,7 @@ static DrvInfos filterBySelector(EvalState & state, const DrvInfos & allElems,
     }
 
     /* Check that all selectors have been used. */
-    for (DrvNames::iterator i = selectors.begin();
-         i != selectors.end(); ++i)
+    foreach (DrvNames::iterator, i, selectors)
         if (i->hits == 0 && i->fullName != "*")
             throw Error(format("selector `%1%' matches no derivations")
                 % i->fullName);
@@ -356,13 +372,15 @@ static void queryInstSources(EvalState & state,
            (import ./foo.nix)' = `(import ./foo.nix).bar'. */
         case srcNixExprs: {
 
-            Expr * e1 = loadSourceExpr(state, instSource.nixExprPath);
+            Value vArg;
+            loadSourceExpr(state, instSource.nixExprPath, vArg);
 
             foreach (Strings::const_iterator, i, args) {
-                Expr * e2 = state.parseExprFromString(*i, absPath("."));
-                Expr * call = new ExprApp(e2, e1);
-                Value v; state.eval(call, v);
-                getDerivations(state, v, "", instSource.autoArgs, elems, true);
+                Expr * eFun = state.parseExprFromString(*i, absPath("."));
+                Value vFun, vTmp;
+                state.eval(eFun, vFun);
+                mkApp(vTmp, vFun, vArg);
+                getDerivations(state, vTmp, "", instSource.autoArgs, elems, true);
             }
 
             break;
@@ -413,10 +431,10 @@ static void queryInstSources(EvalState & state,
         }
 
         case srcAttrPath: {
+            Value vRoot;
+            loadSourceExpr(state, instSource.nixExprPath, vRoot);
             foreach (Strings::const_iterator, i, args) {
-                Value v;
-                findAlongAttrPath(state, *i, instSource.autoArgs,
-                    loadSourceExpr(state, instSource.nixExprPath), v);
+                Value & v(*findAlongAttrPath(state, *i, instSource.autoArgs, vRoot));
                 getDerivations(state, v, "", instSource.autoArgs, elems, true);
             }
             break;
@@ -472,29 +490,31 @@ static void installDerivations(Globals & globals,
         newNames.insert(DrvName(i->name).name);
     }
 
-    /* Add in the already installed derivations, unless they have the
-       same name as a to-be-installed element. */
 
     while (true) {
         string lockToken = optimisticLockProfile(profile);
 
-        DrvInfos installedElems = queryInstalled(globals.state, profile);
-
         DrvInfos allElems(newElems);
-        foreach (DrvInfos::iterator, i, installedElems) {
-            DrvName drvName(i->name);
-            MetaInfo meta = i->queryMetaInfo(globals.state);
-            if (!globals.preserveInstalled &&
-                newNames.find(drvName.name) != newNames.end() &&
-                !keep(meta))
-                printMsg(lvlInfo,
-                    format("replacing old `%1%'") % i->name);
-            else
-                allElems.push_back(*i);
-        }
 
-        foreach (DrvInfos::iterator, i, newElems)
-            printMsg(lvlInfo, format("installing `%1%'") % i->name);
+        /* Add in the already installed derivations, unless they have
+           the same name as a to-be-installed element. */
+        if (!globals.removeAll) {
+            DrvInfos installedElems = queryInstalled(globals.state, profile);
+
+            foreach (DrvInfos::iterator, i, installedElems) {
+                DrvName drvName(i->name);
+                MetaInfo meta = i->queryMetaInfo(globals.state);
+                if (!globals.preserveInstalled &&
+                    newNames.find(drvName.name) != newNames.end() &&
+                    !keep(meta))
+                    printMsg(lvlInfo, format("replacing old `%1%'") % i->name);
+                else
+                    allElems.push_back(*i);
+            }
+
+            foreach (DrvInfos::iterator, i, newElems)
+                printMsg(lvlInfo, format("installing `%1%'") % i->name);
+        }
 
         printMissing(globals.state, newElems);
 
@@ -514,6 +534,8 @@ static void opInstall(Globals & globals,
         if (parseInstallSourceOptions(globals, i, opFlags, arg)) ;
         else if (arg == "--preserve-installed" || arg == "-P")
             globals.preserveInstalled = true;
+        else if (arg == "--remove-all" || arg == "-r")
+            globals.removeAll = true;
         else throw UsageError(format("unknown flag `%1%'") % arg);
     }
 
@@ -894,9 +916,6 @@ static void opQuery(Globals & globals,
             throw UsageError(format("unknown flag `%1%'") % arg);
         else remaining.push_back(arg);
     }
-
-    if (remaining.size() == 0)
-        printMsg(lvlInfo, "warning: you probably meant to specify the argument '*' to show all packages");
 
 
     /* Obtain derivation information from the specified source. */
@@ -1284,6 +1303,7 @@ void run(Strings args)
 
     globals.dryRun = false;
     globals.preserveInstalled = false;
+    globals.removeAll = false;
     globals.prebuiltOnly = false;
 
     for (Strings::iterator i = args.begin(); i != args.end(); ) {

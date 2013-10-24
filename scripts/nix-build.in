@@ -157,17 +157,22 @@ foreach my $expr (@exprs) {
 
     # Instantiate.
     my @drvPaths;
-    # !!! would prefer the perl 5.8.0 pipe open feature here.
-    my $pid = open(DRVPATHS, "-|") || exec "$Nix::Config::binDir/nix-instantiate", "--add-root", $drvLink, "--indirect", @instArgs, $expr;
-    while (<DRVPATHS>) {chomp; push @drvPaths, $_;}
-    if (!close DRVPATHS) {
-        die "nix-instantiate killed by signal " . ($? & 127) . "\n" if ($? & 127);
-        exit 1;
+    if ($expr !~ /^\/.*\.drv$/) {
+        # !!! would prefer the perl 5.8.0 pipe open feature here.
+        my $pid = open(DRVPATHS, "-|") || exec "$Nix::Config::binDir/nix-instantiate", "--add-root", $drvLink, "--indirect", @instArgs, $expr;
+        while (<DRVPATHS>) {chomp; push @drvPaths, $_;}
+        if (!close DRVPATHS) {
+            die "nix-instantiate killed by signal " . ($? & 127) . "\n" if ($? & 127);
+            exit 1;
+        }
+    } else {
+        push @drvPaths, $expr;
     }
 
     if ($runEnv) {
         die "$0: a single derivation is required\n" if scalar @drvPaths != 1;
-        my $drvPath = readlink $drvPaths[0] or die "cannot read symlink `$drvPaths[0]'";
+        my $drvPath = $drvPaths[0];
+        $drvPath = readlink $drvPath or die "cannot read symlink `$drvPath'" if -l $drvPath;
         my $drv = derivationFromPath($drvPath);
 
         # Build or fetch all dependencies of the derivation.
@@ -197,15 +202,18 @@ foreach my $expr (@exprs) {
         my $rcfile = "$tmpDir/rc";
         writeFile(
             $rcfile,
-            '[ -e ~/.bashrc ] && source ~/.bashrc; ' .
+            'unset BASH_ENV; ' .
+            '[ -n "$PS1" ] && [ -e ~/.bashrc ] && source ~/.bashrc; ' .
             ($pure ? '' : 'p=$PATH; ' ) .
             'dontAddDisableDepTrack=1; ' .
             '[ -e $stdenv/setup ] && source $stdenv/setup; ' .
             ($pure ? '' : 'PATH=$PATH:$p; ') .
             'set +e; ' .
-            'PS1="\n\[\033[1;32m\][nix-shell:\w]$\[\033[0m\] "; ' .
+            '[ -n "$PS1" ] && PS1="\n\[\033[1;32m\][nix-shell:\w]$\[\033[0m\] "; ' .
             'unset NIX_ENFORCE_PURITY; ' .
+            'shopt -u nullglob; ' .
             $envCommand);
+        $ENV{BASH_ENV} = $rcfile;
         exec($ENV{NIX_BUILD_SHELL} // "bash", "--rcfile", $rcfile);
         die;
     }
@@ -235,7 +243,7 @@ foreach my $expr (@exprs) {
 
     # Build.
     my @outPaths;
-    $pid = open(OUTPATHS, "-|") || exec "$Nix::Config::binDir/nix-store", "--add-root", $outLink, "--indirect", "-r",
+    my $pid = open(OUTPATHS, "-|") || exec "$Nix::Config::binDir/nix-store", "--add-root", $outLink, "--indirect", "-r",
         @buildArgs, @drvPaths2;
     while (<OUTPATHS>) {chomp; push @outPaths, $_;}
     if (!close OUTPATHS) {

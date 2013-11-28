@@ -93,8 +93,9 @@ class EvalState
 public:
     SymbolTable symbols;
 
-    const Symbol sWith, sOutPath, sDrvPath, sType, sMeta, sName,
-        sSystem, sOverrides, sOutputs, sOutputName, sIgnoreNulls;
+    const Symbol sWith, sOutPath, sDrvPath, sType, sMeta, sName, sValue,
+        sSystem, sOverrides, sOutputs, sOutputName, sIgnoreNulls,
+        sFile, sLine, sColumn;
     Symbol sDerivationNix;
 
     /* If set, force copying files to the Nix store even if they
@@ -145,6 +146,7 @@ public:
 
     /* Evaluation the expression, then verify that it has the expected
        type. */
+    inline bool evalBool(Env & env, Expr * e, Value & v);
     inline bool evalBool(Env & env, Expr * e);
     inline void evalAttrs(Env & env, Expr * e, Value & v);
 
@@ -178,6 +180,8 @@ public:
        referenced paths are copied to the Nix store as a side effect. */
     string coerceToString(Value & v, PathSet & context,
         bool coerceMore = false, bool copyToStore = true);
+
+    string copyPathToStore(PathSet & context, const Path & path);
 
     /* Path coercion.  Converts strings, paths and derivations to a
        path.  The result is guaranteed to be a canonicalised, absolute
@@ -226,6 +230,7 @@ public:
     bool eqValues(Value & v1, Value & v2);
 
     void callFunction(Value & fun, Value & arg, Value & v);
+    void callPrimOp(Value & fun, Value & arg, Value & v);
 
     /* Automatically call a function for which each argument has a
        default value or has a binding in the `args' map. */
@@ -240,6 +245,7 @@ public:
     void mkList(Value & v, unsigned int length);
     void mkAttrs(Value & v, unsigned int expected);
     void mkThunk_(Value & v, Expr * expr);
+    void mkPos(Value & v, Pos * pos);
 
     void concatLists(Value & v, unsigned int nrLists, Value * * lists);
 
@@ -266,6 +272,8 @@ private:
 
     typedef std::map<ExprLambda *, unsigned int> FunctionCalls;
     FunctionCalls functionCalls;
+
+    void incrFunctionCall(ExprLambda * fun);
 
     typedef std::map<Pos, unsigned int> AttrSelects;
     AttrSelects attrSelects;

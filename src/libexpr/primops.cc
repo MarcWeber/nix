@@ -5,6 +5,7 @@
 #include "util.hh"
 #include "archive.hh"
 #include "value-to-xml.hh"
+#include "value-to-json.hh"
 #include "names.hh"
 #include "eval-inline.hh"
 
@@ -160,22 +161,29 @@ static void prim_isBool(EvalState & state, Value * * args, Value & v)
 
 struct CompareValues
 {
-    bool operator () (const Value & v1, const Value & v2) const
+    bool operator () (const Value * v1, const Value * v2) const
     {
-        if (v1.type != v2.type)
+        if (v1->type != v2->type)
             throw EvalError("cannot compare values of different types");
-        switch (v1.type) {
+        switch (v1->type) {
             case tInt:
-                return v1.integer < v2.integer;
+                return v1->integer < v2->integer;
             case tString:
-                return strcmp(v1.string.s, v2.string.s) < 0;
+                return strcmp(v1->string.s, v2->string.s) < 0;
             case tPath:
-                return strcmp(v1.path, v2.path) < 0;
+                return strcmp(v1->path, v2->path) < 0;
             default:
-                throw EvalError(format("cannot compare %1% with %2%") % showType(v1) % showType(v2));
+                throw EvalError(format("cannot compare %1% with %2%") % showType(*v1) % showType(*v2));
         }
     }
 };
+
+
+#if HAVE_BOEHMGC
+typedef list<Value *, gc_allocator<Value *> > ValueList;
+#else
+typedef list<Value *> ValueList;
+#endif
 
 
 static void prim_genericClosure(EvalState & state, Value * * args, Value & v)
@@ -191,7 +199,7 @@ static void prim_genericClosure(EvalState & state, Value * * args, Value & v)
         throw EvalError("attribute `startSet' required");
     state.forceList(*startSet->value);
 
-    list<Value *> workSet;
+    ValueList workSet;
     for (unsigned int n = 0; n < startSet->value->list.length; ++n)
         workSet.push_back(startSet->value->list.elems[n]);
 
@@ -205,8 +213,10 @@ static void prim_genericClosure(EvalState & state, Value * * args, Value & v)
     /* Construct the closure by applying the operator to element of
        `workSet', adding the result to `workSet', continuing until
        no new elements are found. */
-    list<Value> res;
-    set<Value, CompareValues> doneKeys; // !!! use Value *?
+    ValueList res;
+    // `doneKeys' doesn't need to be a GC root, because its values are
+    // reachable from res.
+    set<Value *, CompareValues> doneKeys;
     while (!workSet.empty()) {
         Value * e = *(workSet.begin());
         workSet.pop_front();
@@ -219,9 +229,9 @@ static void prim_genericClosure(EvalState & state, Value * * args, Value & v)
             throw EvalError("attribute `key' required");
         state.forceValue(*key->value);
 
-        if (doneKeys.find(*key->value) != doneKeys.end()) continue;
-        doneKeys.insert(*key->value);
-        res.push_back(*e);
+        if (doneKeys.find(key->value) != doneKeys.end()) continue;
+        doneKeys.insert(key->value);
+        res.push_back(e);
 
         /* Call the `operator' function with `e' as argument. */
         Value call;
@@ -238,8 +248,8 @@ static void prim_genericClosure(EvalState & state, Value * * args, Value & v)
     /* Create the result list. */
     state.mkList(v, res.size());
     unsigned int n = 0;
-    foreach (list<Value>::iterator, i, res)
-        *(v.list.elems[n++] = state.allocValue()) = *i;
+    foreach (ValueList::iterator, i, res)
+        v.list.elems[n++] = *i;
 }
 
 
@@ -254,8 +264,7 @@ static void prim_abort(EvalState & state, Value * * args, Value & v)
 static void prim_throw(EvalState & state, Value * * args, Value & v)
 {
     PathSet context;
-    throw ThrownError(format("user-thrown exception: %1%") %
-        state.coerceToString(*args[0], context));
+    throw ThrownError(format("%1%") % state.coerceToString(*args[0], context));
 }
 
 
@@ -279,10 +288,10 @@ static void prim_tryEval(EvalState & state, Value * * args, Value & v)
     state.mkAttrs(v, 2);
     try {
         state.forceValue(*args[0]);
-        v.attrs->push_back(Attr(state.symbols.create("value"), args[0]));
+        v.attrs->push_back(Attr(state.sValue, args[0]));
         mkBool(*state.allocAttr(v, state.symbols.create("success")), true);
     } catch (AssertionError & e) {
-        mkBool(*state.allocAttr(v, state.symbols.create("value")), false);
+        mkBool(*state.allocAttr(v, state.sValue), false);
         mkBool(*state.allocAttr(v, state.symbols.create("success")), false);
     }
     v.attrs->sort();
@@ -640,6 +649,18 @@ static void prim_toXML(EvalState & state, Value * * args, Value & v)
 }
 
 
+/* Convert the argument (which can be any Nix expression) to a JSON
+   string.  Not all Nix expressions can be sensibly or completely
+   represented (e.g., functions). */
+static void prim_toJSON(EvalState & state, Value * * args, Value & v)
+{
+    std::ostringstream out;
+    PathSet context;
+    printValueAsJSON(state, true, *args[0], out, context);
+    mkString(v, out.str(), context);
+}
+
+
 /* Store a string in the Nix store as a source file that can be used
    as an input by derivations. */
 static void prim_toFile(EvalState & state, Value * * args, Value & v)
@@ -882,6 +903,19 @@ void prim_getAttr(EvalState & state, Value * * args, Value & v)
 }
 
 
+/* Return position information of the specified attribute. */
+void prim_unsafeGetAttrPos(EvalState & state, Value * * args, Value & v)
+{
+    string attr = state.forceStringNoCtx(*args[0]);
+    state.forceAttrs(*args[1]);
+    Bindings::iterator i = args[1]->attrs->find(state.symbols.create(attr));
+    if (i == args[1]->attrs->end())
+        mkNull(v);
+    else
+        state.mkPos(v, i->pos);
+}
+
+
 /* Dynamic version of the `?' operator. */
 static void prim_hasAttr(EvalState & state, Value * * args, Value & v)
 {
@@ -925,7 +959,8 @@ static void prim_removeAttrs(EvalState & state, Value * * args, Value & v)
 /* Builds a set from a list specifying (name, value) pairs.  To be
    precise, a list [{name = "name1"; value = value1;} ... {name =
    "nameN"; value = valueN;}] is transformed to {name1 = value1;
-   ... nameN = valueN;}. */
+   ... nameN = valueN;}.  In case of duplicate occurences of the same
+   name, the first takes precedence. */
 static void prim_listToAttrs(EvalState & state, Value * * args, Value & v)
 {
     state.forceList(*args[0]);
@@ -943,16 +978,15 @@ static void prim_listToAttrs(EvalState & state, Value * * args, Value & v)
             throw TypeError("`name' attribute missing in a call to `listToAttrs'");
         string name = state.forceStringNoCtx(*j->value);
 
-        Bindings::iterator j2 = v2.attrs->find(state.symbols.create("value"));
-        if (j2 == v2.attrs->end())
-            throw TypeError("`value' attribute missing in a call to `listToAttrs'");
-
         Symbol sym = state.symbols.create(name);
         if (seen.find(sym) == seen.end()) {
+            Bindings::iterator j2 = v2.attrs->find(state.symbols.create(state.sValue));
+            if (j2 == v2.attrs->end())
+                throw TypeError("`value' attribute missing in a call to `listToAttrs'");
+
             v.attrs->push_back(Attr(sym, j2->value, j2->pos));
             seen.insert(sym);
         }
-        /* !!! Throw an error if `name' already exists? */
     }
 
     v.attrs->sort();
@@ -1171,7 +1205,7 @@ static void prim_lessThan(EvalState & state, Value * * args, Value & v)
     state.forceValue(*args[0]);
     state.forceValue(*args[1]);
     CompareValues comp;
-    mkBool(v, comp(*args[0], *args[1]));
+    mkBool(v, comp(args[0], args[1]));
 }
 
 
@@ -1307,7 +1341,7 @@ void EvalState::createBaseEnv()
     mkBool(v, false);
     addConstant("false", v);
 
-    v.type = tNull;
+    mkNull(v);
     addConstant("null", v);
 
     mkInt(v, time(0));
@@ -1352,6 +1386,7 @@ void EvalState::createBaseEnv()
 
     // Creating files
     addPrimOp("__toXML", 1, prim_toXML);
+    addPrimOp("__toJSON", 1, prim_toJSON);
     addPrimOp("__toFile", 2, prim_toFile);
     addPrimOp("__filterSource", 2, prim_filterSource);
     addPrimOp("writeFileHashed", 1, prim_writeFileHashed);
@@ -1359,6 +1394,7 @@ void EvalState::createBaseEnv()
     // Sets
     addPrimOp("__attrNames", 1, prim_attrNames);
     addPrimOp("__getAttr", 2, prim_getAttr);
+    addPrimOp("__unsafeGetAttrPos", 2, prim_unsafeGetAttrPos);
     addPrimOp("__hasAttr", 2, prim_hasAttr);
     addPrimOp("__isAttrs", 1, prim_isAttrs);
     addPrimOp("removeAttrs", 2, prim_removeAttrs);

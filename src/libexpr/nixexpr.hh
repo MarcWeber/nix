@@ -205,7 +205,7 @@ struct ExprLambda : Expr
                 % arg % pos);
     };
     void setName(Symbol & name);
-    string showNamePos();
+    string showNamePos() const;
     COMMON_METHODS
 };
 
@@ -279,6 +279,13 @@ struct ExprConcatStrings : Expr
     vector<Expr *> * es;
     ExprConcatStrings(bool forceString, vector<Expr *> * es)
         : forceString(forceString), es(es) { };
+    COMMON_METHODS
+};
+
+struct ExprPos : Expr
+{
+    Pos pos;
+    ExprPos(const Pos & pos) : pos(pos) { };
     COMMON_METHODS
 };
 

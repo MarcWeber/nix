@@ -5,30 +5,23 @@
 #include "globals.hh"
 #include "shared.hh"
 #include "eval.hh"
+#include "eval-inline.hh"
 #include "profiles.hh"
 
 
 namespace nix {
 
 
-static void readLegacyManifest(const Path & path, DrvInfos & elems);
-
-
 DrvInfos queryInstalled(EvalState & state, const Path & userEnv)
 {
     DrvInfos elems;
-
     Path manifestFile = userEnv + "/manifest.nix";
-    Path oldManifestFile = userEnv + "/manifest";
-
     if (pathExists(manifestFile)) {
         Value v;
         state.evalFile(manifestFile, v);
         Bindings bindings;
         getDerivations(state, v, "", bindings, elems, false);
-    } else if (pathExists(oldManifestFile))
-        readLegacyManifest(oldManifestFile, elems);
-
+    }
     return elems;
 }
 
@@ -40,9 +33,9 @@ bool createUserEnv(EvalState & state, DrvInfos & elems,
     /* Build the components in the user environment, if they don't
        exist already. */
     PathSet drvsToBuild;
-    foreach (DrvInfos::const_iterator, i, elems)
-        if (i->queryDrvPath(state) != "")
-            drvsToBuild.insert(i->queryDrvPath(state));
+    foreach (DrvInfos::iterator, i, elems)
+        if (i->queryDrvPath() != "")
+            drvsToBuild.insert(i->queryDrvPath());
 
     debug(format("building user environment dependencies"));
     store->buildPaths(drvsToBuild, state.repair);
@@ -56,7 +49,7 @@ bool createUserEnv(EvalState & state, DrvInfos & elems,
         /* Create a pseudo-derivation containing the name, system,
            output paths, and optionally the derivation path, as well
            as the meta attributes. */
-        Path drvPath = keepDerivations ? i->queryDrvPath(state) : "";
+        Path drvPath = keepDerivations ? i->queryDrvPath() : "";
 
         Value & v(*state.allocValue());
         manifest.list.elems[n++] = &v;
@@ -66,12 +59,12 @@ bool createUserEnv(EvalState & state, DrvInfos & elems,
         mkString(*state.allocAttr(v, state.sName), i->name);
         if (!i->system.empty())
             mkString(*state.allocAttr(v, state.sSystem), i->system);
-        mkString(*state.allocAttr(v, state.sOutPath), i->queryOutPath(state));
+        mkString(*state.allocAttr(v, state.sOutPath), i->queryOutPath());
         if (drvPath != "")
-            mkString(*state.allocAttr(v, state.sDrvPath), i->queryDrvPath(state));
+            mkString(*state.allocAttr(v, state.sDrvPath), i->queryDrvPath());
 
         // Copy each output.
-        DrvInfo::Outputs outputs = i->queryOutputs(state);
+        DrvInfo::Outputs outputs = i->queryOutputs();
         Value & vOutputs = *state.allocAttr(v, state.sOutputs);
         state.mkList(vOutputs, outputs.size());
         unsigned int m = 0;
@@ -92,28 +85,12 @@ bool createUserEnv(EvalState & state, DrvInfos & elems,
         // Copy the meta attributes.
         Value & vMeta = *state.allocAttr(v, state.sMeta);
         state.mkAttrs(vMeta, 16);
-
-        MetaInfo meta = i->queryMetaInfo(state);
-
-        foreach (MetaInfo::const_iterator, j, meta) {
-            Value & v2(*state.allocAttr(vMeta, state.symbols.create(j->first)));
-            switch (j->second.type) {
-                case MetaValue::tpInt: mkInt(v2, j->second.intValue); break;
-                case MetaValue::tpString: mkString(v2, j->second.stringValue); break;
-                case MetaValue::tpStrings: {
-                    state.mkList(v2, j->second.stringValues.size());
-                    unsigned int m = 0;
-                    foreach (Strings::const_iterator, k, j->second.stringValues) {
-                        v2.list.elems[m] = state.allocValue();
-                        mkString(*v2.list.elems[m++], *k);
-                    }
-                    break;
-                }
-                default: abort();
-            }
+        StringSet metaNames = i->queryMetaNames();
+        foreach (StringSet::iterator, j, metaNames) {
+            Value * v = i->queryMeta(*j);
+            if (!v) continue;
+            vMeta.attrs->push_back(Attr(state.symbols.create(*j), v));
         }
-
-        vMeta.attrs->sort();
         v.attrs->sort();
 
         if (drvPath != "") references.insert(drvPath);
@@ -141,13 +118,14 @@ bool createUserEnv(EvalState & state, DrvInfos & elems,
 
     /* Evaluate it. */
     debug("evaluating user environment builder");
-    DrvInfo topLevelDrv;
-    if (!getDerivation(state, topLevel, topLevelDrv, false))
-        abort();
+    state.forceValue(topLevel);
+    PathSet context;
+    Path topLevelDrv = state.coerceToPath(*topLevel.attrs->find(state.sDrvPath)->value, context);
+    Path topLevelOut = state.coerceToPath(*topLevel.attrs->find(state.sOutPath)->value, context);
 
     /* Realise the resulting store expression. */
     debug("building user environment");
-    store->buildPaths(singleton<PathSet>(topLevelDrv.queryDrvPath(state)), state.repair);
+    store->buildPaths(singleton<PathSet>(topLevelDrv), state.repair);
 
     /* Switch the current user environment to the output path. */
     PathLocks lock;
@@ -160,113 +138,10 @@ bool createUserEnv(EvalState & state, DrvInfos & elems,
     }
 
     debug(format("switching to new user environment"));
-    Path generation = createGeneration(profile, topLevelDrv.queryOutPath(state));
+    Path generation = createGeneration(profile, topLevelOut);
     switchLink(profile, generation);
 
     return true;
-}
-
-
-/* Code for parsing manifests in the old textual ATerm format. */
-
-static string parseStr(std::istream & str)
-{
-    expect(str, "Str(");
-    string s = parseString(str);
-    expect(str, ",[])");
-    return s;
-}
-
-
-static string parseWord(std::istream & str)
-{
-    string res;
-    while (isalpha(str.peek()))
-        res += str.get();
-    return res;
-}
-
-
-static MetaInfo parseMeta(std::istream & str)
-{
-    MetaInfo meta;
-
-    expect(str, "Attrs([");
-    while (!endOfList(str)) {
-        expect(str, "Bind(");
-
-        MetaValue value;
-
-        string name = parseString(str);
-        expect(str, ",");
-
-        string type = parseWord(str);
-
-        if (type == "Str") {
-            expect(str, "(");
-            value.type = MetaValue::tpString;
-            value.stringValue = parseString(str);
-            expect(str, ",[])");
-        }
-
-        else if (type == "List") {
-            expect(str, "([");
-            value.type = MetaValue::tpStrings;
-            while (!endOfList(str))
-                value.stringValues.push_back(parseStr(str));
-            expect(str, ")");
-        }
-
-        else throw Error(format("unexpected token `%1%'") % type);
-
-        expect(str, ",NoPos)");
-        meta[name] = value;
-    }
-
-    expect(str, ")");
-
-    return meta;
-}
-
-
-static void readLegacyManifest(const Path & path, DrvInfos & elems)
-{
-    string manifest = readFile(path);
-    std::istringstream str(manifest);
-    expect(str, "List([");
-
-    unsigned int n = 0;
-
-    while (!endOfList(str)) {
-        DrvInfo elem;
-        expect(str, "Attrs([");
-
-        while (!endOfList(str)) {
-            expect(str, "Bind(");
-            string name = parseString(str);
-            expect(str, ",");
-
-            if (name == "meta") elem.setMetaInfo(parseMeta(str));
-            else {
-                string value = parseStr(str);
-                if (name == "name") elem.name = value;
-                else if (name == "outPath") elem.setOutPath(value);
-                else if (name == "drvPath") elem.setDrvPath(value);
-                else if (name == "system") elem.system = value;
-            }
-
-            expect(str, ",NoPos)");
-        }
-
-        expect(str, ")");
-
-        if (elem.name != "") {
-            elem.attrPath = int2String(n++);
-            elems.push_back(elem);
-        }
-    }
-
-    expect(str, ")");
 }
 
 

@@ -49,7 +49,7 @@ available as <function>builtins.derivation</function>.</para>
     define it yourself:
 
 <programlisting>
-attrValues = attrs: map (name: builtins.getAttr name attrs) (builtins.attrNames attrs);</programlisting>
+attrValues = set: map (name: builtins.getAttr name set) (builtins.attrNames set);</programlisting>
 
     </para></listitem>
 
@@ -750,6 +750,18 @@ in foo</programlisting>
   </varlistentry>
 
 
+  <varlistentry><term><function>builtins.toJSON</function> <replaceable>e</replaceable></term>
+
+    <listitem><para>Return a string containing a JSON representation
+    of <replaceable>e</replaceable>.  Strings, integers, booleans,
+    nulls and lists are mapped to their JSON equivalents.  Sets
+    (except derivations) are represented as objects.  Derivations are
+    translated to a JSON string containing the derivation’s output
+    path.  Paths are copied to the store and represented as a JSON
+    string of the resulting store path.</para></listitem>
+
+  </varlistentry>
+
   <varlistentry><term><function>builtins.toPath</function> <replaceable>s</replaceable></term>
 
     <listitem><para>Convert the string value
@@ -908,7 +920,7 @@ stdenv.mkDerivation (rec {
     <replaceable>e</replaceable>, namely <literal>"int"</literal>,
     <literal>"bool"</literal>, <literal>"string"</literal>,
     <literal>"path"</literal>, <literal>"null"</literal>,
-    <literal>"attrs"</literal>, <literal>"list"</literal> or
+    <literal>"set"</literal>, <literal>"list"</literal> or
     <literal>"lambda"</literal>.</para></listitem>
 
   </varlistentry>

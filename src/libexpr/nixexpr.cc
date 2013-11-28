@@ -130,6 +130,11 @@ void ExprConcatStrings::show(std::ostream & str)
     }
 }
 
+void ExprPos::show(std::ostream & str)
+{
+    str << "__curPos";
+}
+
 
 std::ostream & operator << (std::ostream & str, const Pos & pos)
 {
@@ -315,6 +320,10 @@ void ExprConcatStrings::bindVars(const StaticEnv & env)
         (*i)->bindVars(env);
 }
 
+void ExprPos::bindVars(const StaticEnv & env)
+{
+}
+
 
 /* Storing function names. */
 
@@ -330,7 +339,7 @@ void ExprLambda::setName(Symbol & name)
 }
 
 
-string ExprLambda::showNamePos()
+string ExprLambda::showNamePos() const
 {
     return (format("%1% at %2%") % (name.set() ? "`" + (string) name + "'" : "an anonymous function") % pos).str();
 }

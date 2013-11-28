@@ -136,11 +136,15 @@ EvalState::EvalState()
     , sType(symbols.create("type"))
     , sMeta(symbols.create("meta"))
     , sName(symbols.create("name"))
+    , sValue(symbols.create("value"))
     , sSystem(symbols.create("system"))
     , sOverrides(symbols.create("__overrides"))
     , sOutputs(symbols.create("outputs"))
     , sOutputName(symbols.create("outputName"))
     , sIgnoreNulls(symbols.create("__ignoreNulls"))
+    , sFile(symbols.create("file"))
+    , sLine(symbols.create("line"))
+    , sColumn(symbols.create("column"))
     , repair(false)
     , baseEnv(allocEnv(128))
     , staticBaseEnv(false, 0)
@@ -248,9 +252,19 @@ LocalNoInlineNoReturn(void throwTypeError(const char * s))
     throw TypeError(s);
 }
 
+LocalNoInlineNoReturn(void throwTypeError(const char * s, const string & s1))
+{
+    throw TypeError(format(s) % s1);
+}
+
 LocalNoInlineNoReturn(void throwTypeError(const char * s, const string & s1, const string & s2))
 {
     throw TypeError(format(s) % s1 % s2);
+}
+
+LocalNoInlineNoReturn(void throwTypeError(const char * s, const ExprLambda & fun, const Symbol & s2))
+{
+    throw TypeError(format(s) % fun.showNamePos() % s2);
 }
 
 LocalNoInlineNoReturn(void throwAssertionError(const char * s, const Pos & pos))
@@ -266,6 +280,11 @@ LocalNoInlineNoReturn(void throwUndefinedVarError(const char * s, const string &
 LocalNoInline(void addErrorPrefix(Error & e, const char * s, const string & s2))
 {
     e.addPrefix(format(s) % s2);
+}
+
+LocalNoInline(void addErrorPrefix(Error & e, const char * s, const ExprLambda & fun))
+{
+    e.addPrefix(format(s) % fun.showNamePos());
 }
 
 LocalNoInline(void addErrorPrefix(Error & e, const char * s, const string & s2, const Pos & pos))
@@ -391,6 +410,19 @@ void EvalState::mkThunk_(Value & v, Expr * expr)
 }
 
 
+void EvalState::mkPos(Value & v, Pos * pos)
+{
+    if (pos) {
+        mkAttrs(v, 3);
+        mkString(*allocAttr(v, sFile), pos->file);
+        mkInt(*allocAttr(v, sLine), pos->line);
+        mkInt(*allocAttr(v, sColumn), pos->column);
+        v.attrs->sort();
+    } else
+        mkNull(v);
+}
+
+
 /* Create a thunk for the delayed computation of the given expression
    in the given environment.  But if the expression is a variable,
    then look it up right away.  This significantly reduces the number
@@ -474,13 +506,19 @@ void EvalState::eval(Expr * e, Value & v)
 }
 
 
+inline bool EvalState::evalBool(Env & env, Expr * e, Value & v)
+{
+    e->eval(*this, env, v);
+    if (v.type != tBool)
+        throwTypeError("value is %1% while a Boolean was expected", v);
+    return v.boolean;
+}
+
+
 inline bool EvalState::evalBool(Env & env, Expr * e)
 {
     Value v;
-    e->eval(*this, env, v);
-    if (v.type != tBool)
-        throwTypeError("value is %1% while a Boolean was expected", showType(v));
-    return v.boolean;
+    return evalBool(env, e, v);
 }
 
 
@@ -488,7 +526,7 @@ inline void EvalState::evalAttrs(Env & env, Expr * e, Value & v)
 {
     e->eval(*this, env, v);
     if (v.type != tAttrs)
-        throwTypeError("value is %1% while a set was expected", showType(v));
+        throwTypeError("value is %1% while a set was expected", v);
 }
 
 
@@ -688,80 +726,86 @@ void ExprLambda::eval(EvalState & state, Env & env, Value & v)
 
 void ExprApp::eval(EvalState & state, Env & env, Value & v)
 {
-    Value vFun;
-    e1->eval(state, env, vFun);
-    state.callFunction(vFun, *(e2->maybeThunk(state, env)), v);
+    e1->eval(state, env, v);
+    state.callFunction(v, *(e2->maybeThunk(state, env)), v);
+}
+
+
+void EvalState::callPrimOp(Value & fun, Value & arg, Value & v)
+{
+    /* Figure out the number of arguments still needed. */
+    unsigned int argsDone = 0;
+    Value * primOp = &fun;
+    while (primOp->type == tPrimOpApp) {
+        argsDone++;
+        primOp = primOp->primOpApp.left;
+    }
+    assert(primOp->type == tPrimOp);
+    unsigned int arity = primOp->primOp->arity;
+    unsigned int argsLeft = arity - argsDone;
+
+    if (argsLeft == 1) {
+        /* We have all the arguments, so call the primop. */
+
+        /* Put all the arguments in an array. */
+        Value * vArgs[arity];
+        unsigned int n = arity - 1;
+        vArgs[n--] = &arg;
+        for (Value * arg = &fun; arg->type == tPrimOpApp; arg = arg->primOpApp.left)
+            vArgs[n--] = arg->primOpApp.right;
+
+        /* And call the primop. */
+        nrPrimOpCalls++;
+        if (countCalls) primOpCalls[primOp->primOp->name]++;
+        primOp->primOp->fun(*this, vArgs, v);
+    } else {
+        Value * fun2 = allocValue();
+        *fun2 = fun;
+        v.type = tPrimOpApp;
+        v.primOpApp.left = fun2;
+        v.primOpApp.right = &arg;
+    }
 }
 
 
 void EvalState::callFunction(Value & fun, Value & arg, Value & v)
 {
     if (fun.type == tPrimOp || fun.type == tPrimOpApp) {
-
-        /* Figure out the number of arguments still needed. */
-        unsigned int argsDone = 0;
-        Value * primOp = &fun;
-        while (primOp->type == tPrimOpApp) {
-            argsDone++;
-            primOp = primOp->primOpApp.left;
-        }
-        assert(primOp->type == tPrimOp);
-        unsigned int arity = primOp->primOp->arity;
-        unsigned int argsLeft = arity - argsDone;
-
-        if (argsLeft == 1) {
-            /* We have all the arguments, so call the primop. */
-
-            /* Put all the arguments in an array. */
-            Value * vArgs[arity];
-            unsigned int n = arity - 1;
-            vArgs[n--] = &arg;
-            for (Value * arg = &fun; arg->type == tPrimOpApp; arg = arg->primOpApp.left)
-                vArgs[n--] = arg->primOpApp.right;
-
-            /* And call the primop. */
-            nrPrimOpCalls++;
-            if (countCalls) primOpCalls[primOp->primOp->name]++;
-            primOp->primOp->fun(*this, vArgs, v);
-        } else {
-            v.type = tPrimOpApp;
-            v.primOpApp.left = allocValue();
-            *v.primOpApp.left = fun;
-            v.primOpApp.right = &arg;
-        }
+        callPrimOp(fun, arg, v);
         return;
     }
 
     if (fun.type != tLambda)
-        throwTypeError("attempt to call something which is not a function but %1%",
-            showType(fun));
+        throwTypeError("attempt to call something which is not a function but %1%", fun);
+
+    ExprLambda & lambda(*fun.lambda.fun);
 
     unsigned int size =
-        (fun.lambda.fun->arg.empty() ? 0 : 1) +
-        (fun.lambda.fun->matchAttrs ? fun.lambda.fun->formals->formals.size() : 0);
+        (lambda.arg.empty() ? 0 : 1) +
+        (lambda.matchAttrs ? lambda.formals->formals.size() : 0);
     Env & env2(allocEnv(size));
     env2.up = fun.lambda.env;
 
     unsigned int displ = 0;
 
-    if (!fun.lambda.fun->matchAttrs)
+    if (!lambda.matchAttrs)
         env2.values[displ++] = &arg;
 
     else {
         forceAttrs(arg);
 
-        if (!fun.lambda.fun->arg.empty())
+        if (!lambda.arg.empty())
             env2.values[displ++] = &arg;
 
         /* For each formal argument, get the actual argument.  If
            there is no matching actual argument but the formal
            argument has a default, use the default. */
         unsigned int attrsUsed = 0;
-        foreach (Formals::Formals_::iterator, i, fun.lambda.fun->formals->formals) {
+        foreach (Formals::Formals_::iterator, i, lambda.formals->formals) {
             Bindings::iterator j = arg.attrs->find(i->name);
             if (j == arg.attrs->end()) {
                 if (!i->def) throwTypeError("%1% called without required argument `%2%'",
-                    fun.lambda.fun->showNamePos(), i->name);
+                    lambda, i->name);
                 env2.values[displ++] = i->def->maybeThunk(*this, env2);
             } else {
                 attrsUsed++;
@@ -771,25 +815,38 @@ void EvalState::callFunction(Value & fun, Value & arg, Value & v)
 
         /* Check that each actual argument is listed as a formal
            argument (unless the attribute match specifies a `...'). */
-        if (!fun.lambda.fun->formals->ellipsis && attrsUsed != arg.attrs->size()) {
+        if (!lambda.formals->ellipsis && attrsUsed != arg.attrs->size()) {
             /* Nope, so show the first unexpected argument to the
                user. */
             foreach (Bindings::iterator, i, *arg.attrs)
-                if (fun.lambda.fun->formals->argNames.find(i->name) == fun.lambda.fun->formals->argNames.end())
-                    throwTypeError("%1% called with unexpected argument `%2%'", fun.lambda.fun->showNamePos(), i->name);
+                if (lambda.formals->argNames.find(i->name) == lambda.formals->argNames.end())
+                    throwTypeError("%1% called with unexpected argument `%2%'", lambda, i->name);
             abort(); // can't happen
         }
     }
 
     nrFunctionCalls++;
-    if (countCalls) functionCalls[fun.lambda.fun]++;
+    if (countCalls) incrFunctionCall(&lambda);
 
-    try {
+    /* Evaluate the body.  This is conditional on showTrace, because
+       catching exceptions makes this function not tail-recursive. */
+    if (settings.showTrace)
+        try {
+            lambda.body->eval(*this, env2, v);
+        } catch (Error & e) {
+            addErrorPrefix(e, "while evaluating %1%:\n", lambda);
+            throw;
+        }
+    else
         fun.lambda.fun->body->eval(*this, env2, v);
-    } catch (Error & e) {
-        addErrorPrefix(e, "while evaluating %1%:\n", fun.lambda.fun->showNamePos());
-        throw;
-    }
+}
+
+
+// Lifted out of callFunction() because it creates a temporary that
+// prevents tail-call optimisation.
+void EvalState::incrFunctionCall(ExprLambda * fun)
+{
+    functionCalls[fun]++;
 }
 
 
@@ -833,13 +890,13 @@ void ExprWith::eval(EvalState & state, Env & env, Value & v)
 
 void ExprIf::eval(EvalState & state, Env & env, Value & v)
 {
-    (state.evalBool(env, cond) ? then : else_)->eval(state, env, v);
+    (state.evalBool(env, cond, v) ? then : else_)->eval(state, env, v);
 }
 
 
 void ExprAssert::eval(EvalState & state, Env & env, Value & v)
 {
-    if (!state.evalBool(env, cond))
+    if (!state.evalBool(env, cond, v))
         throwAssertionError("assertion failed at %1%", pos);
     body->eval(state, env, v);
 }
@@ -998,6 +1055,12 @@ void ExprConcatStrings::eval(EvalState & state, Env & env, Value & v)
 }
 
 
+void ExprPos::eval(EvalState & state, Env & env, Value & v)
+{
+    state.mkPos(v, &pos);
+}
+
+
 void EvalState::strictForceValue(Value & v)
 {
     forceValue(v);
@@ -1018,7 +1081,7 @@ NixInt EvalState::forceInt(Value & v)
 {
     forceValue(v);
     if (v.type != tInt)
-        throwTypeError("value is %1% while an integer was expected", showType(v));
+        throwTypeError("value is %1% while an integer was expected", v);
     return v.integer;
 }
 
@@ -1027,7 +1090,7 @@ bool EvalState::forceBool(Value & v)
 {
     forceValue(v);
     if (v.type != tBool)
-        throwTypeError("value is %1% while a Boolean was expected", showType(v));
+        throwTypeError("value is %1% while a Boolean was expected", v);
     return v.boolean;
 }
 
@@ -1036,7 +1099,7 @@ void EvalState::forceFunction(Value & v)
 {
     forceValue(v);
     if (v.type != tLambda && v.type != tPrimOp && v.type != tPrimOpApp)
-        throwTypeError("value is %1% while a function was expected", showType(v));
+        throwTypeError("value is %1% while a function was expected", v);
 }
 
 
@@ -1044,7 +1107,7 @@ string EvalState::forceString(Value & v)
 {
     forceValue(v);
     if (v.type != tString)
-        throwTypeError("value is %1% while a string was expected", showType(v));
+        throwTypeError("value is %1% while a string was expected", v);
     return string(v.string.s);
 }
 
@@ -1100,26 +1163,7 @@ string EvalState::coerceToString(Value & v, PathSet & context,
 
     if (v.type == tPath) {
         Path path(canonPath(v.path));
-
-        if (!copyToStore) return path;
-
-        if (nix::isDerivation(path))
-            throwEvalError("file names are not allowed to end in `%1%'", drvExtension);
-
-        Path dstPath;
-        if (srcToStore[path] != "")
-            dstPath = srcToStore[path];
-        else {
-            dstPath = settings.readOnlyMode
-                ? computeStorePathForPath(path).first
-                : store->addToStore(path, true, htSHA256, defaultPathFilter, repair);
-            srcToStore[path] = dstPath;
-            printMsg(lvlChatty, format("copied source `%1%' -> `%2%'")
-                % path % dstPath);
-        }
-
-        context.insert(dstPath);
-        return dstPath;
+        return copyToStore ? copyPathToStore(context, path) : path;
     }
 
     if (v.type == tAttrs) {
@@ -1151,7 +1195,29 @@ string EvalState::coerceToString(Value & v, PathSet & context,
         }
     }
 
-    throwTypeError("cannot coerce %1% to a string", showType(v));
+    throwTypeError("cannot coerce %1% to a string", v);
+}
+
+
+string EvalState::copyPathToStore(PathSet & context, const Path & path)
+{
+    if (nix::isDerivation(path))
+        throwEvalError("file names are not allowed to end in `%1%'", drvExtension);
+
+    Path dstPath;
+    if (srcToStore[path] != "")
+        dstPath = srcToStore[path];
+    else {
+        dstPath = settings.readOnlyMode
+            ? computeStorePathForPath(path).first
+            : store->addToStore(path, true, htSHA256, defaultPathFilter, repair);
+        srcToStore[path] = dstPath;
+        printMsg(lvlChatty, format("copied source `%1%' -> `%2%'")
+            % path % dstPath);
+    }
+
+    context.insert(dstPath);
+    return dstPath;
 }
 
 

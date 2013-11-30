@@ -1,14 +1,17 @@
 From: Marc Weber <marco-oweber@gmx.de>
 Subject: [PATCH] experimental/write-file-hashed
 
-Until somebody takes time to implement password protection proberly eg the way its suggested here:
-https://github.com/NixOS/nix/issues/8, implement a quick and dirty way to write password files.
+This patch provides a function writing secret contentst to a special place.
+So it works around the password problem. Its implementation looks like this:
 
-The idea is to make nixos-rebuild write the password files based on
-configuration.nix so that they can be read by scripts (eg mysql startup script)
-without being stored in the store which would be public readable.
+  writeFileHashed = { prefix ? "", dir, contents}:
+    let path = "${dir}/${prefix}${hash contents}";
+    in write_contents_while_evaluating_and_return_path path contents
 
-Using this you also have to copy the password files - copying store paths is no
-longer enough to reproduce your system
+pros/cons:
++ easy to verify that its secury enough
+- if you need a root file you have to evaluate as root
+- store paths depend on files outside of the store which you cannot
+  nix-copy-closure
 
 Signed-off-by: Marc Weber <marco-oweber@gmx.de>
